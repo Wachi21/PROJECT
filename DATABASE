@@ -169,3 +169,86 @@ INSERT IGNORE INTO room_equipment (room_id, equipment_id, quantity) VALUES
     ('r15-210', 'projector', 1), ('r15-210', 'aircon', 2), ('r15-210', 'whiteboard', 1),
     ('r-lab-a', 'pc', 30), ('r-lab-a', 'projector', 1), ('r-lab-a', 'aircon', 2), ('r-lab-a', 'wifi', 1),
     ('r-semi',  'projector', 1), ('r-semi',  'aircon', 1), ('r-semi',  'whiteboard', 1), ('r-semi', 'wifi', 1);
+
+-- KMITL Classroom Booking - Part 3: Triggers, Views and SQL Examples
+-- รันหลังจาก 01_core_database.sql และ 02_additional_tables.sql
+
+USE project;
+
+-- Triggers: บันทึกประวัติอัตโนมัติทุกครั้งที่จองหรือยกเลิก
+-- แอปเวอร์ชัน MySQL ไม่เขียน history เอง ต้องมี trigger สองตัวนี้
+DROP TRIGGER IF EXISTS trg_bookings_after_insert;
+DROP TRIGGER IF EXISTS trg_bookings_before_delete;
+
+DELIMITER $$
+
+CREATE TRIGGER trg_bookings_after_insert
+AFTER INSERT ON bookings
+FOR EACH ROW
+BEGIN
+    INSERT INTO history
+        (room_id, room_name, booking_date, slot_id, slot_label, booker_name, purpose, action)
+    SELECT NEW.room_id, r.room_name, NEW.booking_date, NEW.slot_id, s.slot_label,
+           NEW.booker_name, NEW.purpose, 'จอง'
+    FROM rooms r
+    JOIN time_slots s ON s.slot_id = NEW.slot_id
+    WHERE r.room_id = NEW.room_id;
+END$$
+
+CREATE TRIGGER trg_bookings_before_delete
+BEFORE DELETE ON bookings
+FOR EACH ROW
+BEGIN
+    INSERT INTO history
+        (room_id, room_name, booking_date, slot_id, slot_label, booker_name, purpose, action)
+    SELECT OLD.room_id, r.room_name, OLD.booking_date, OLD.slot_id, s.slot_label,
+           OLD.booker_name, OLD.purpose, 'ยกเลิก'
+    FROM rooms r
+    JOIN time_slots s ON s.slot_id = OLD.slot_id
+    WHERE r.room_id = OLD.room_id;
+END$$
+
+DELIMITER ;
+
+-- View: รายการจองพร้อมชื่อห้องและคาบเวลา
+CREATE OR REPLACE VIEW v_booking_details AS
+SELECT b.booking_id,
+       b.booking_date,
+       r.room_name,
+       r.building,
+       s.slot_label,
+       b.booker_name,
+       b.purpose,
+       b.created_at
+FROM bookings b
+JOIN rooms r      ON r.room_id  = b.room_id
+JOIN time_slots s ON s.slot_id  = b.slot_id
+ORDER BY b.booking_date, r.room_name, s.start_time;
+
+-- ตัวอย่างคำสั่งที่แอปจะใช้ (เลือกคำสั่งแล้วรันทีละคำสั่งได้)
+
+-- ดูตารางของห้องหนึ่ง ในวันหนึ่ง (ว่าง/จองแล้ว)
+-- SELECT s.slot_label,
+--        IF(b.booking_id IS NULL, 'ว่าง', 'จองแล้ว') AS status,
+--        b.booker_name, b.purpose
+-- FROM time_slots s
+-- LEFT JOIN bookings b
+--        ON b.slot_id = s.slot_id
+--       AND b.room_id = 'r12-201'
+--       AND b.booking_date = '2026-10-26'
+-- ORDER BY s.start_time;
+
+-- จองคาบ (ถ้าซ้ำจะ error 1062 Duplicate entry)
+-- INSERT INTO bookings (room_id, booking_date, slot_id, booker_name, purpose)
+-- VALUES ('r12-201', '2026-10-26', '0900', 'สมชาย ใจดี', 'ติววิชาแคลคูลัส');
+
+-- ยกเลิกการจอง
+-- DELETE FROM bookings WHERE booking_id = 1;
+
+-- ดูประวัติล่าสุด 200 รายการ
+-- SELECT logged_at, action, room_name, booking_date, slot_label, booker_name, purpose
+-- FROM history ORDER BY history_id DESC LIMIT 200;
+
+-- หมายเหตุ:
+-- ส่วน Migration สำหรับเพิ่ม users ให้ฐานข้อมูลเก่าในไฟล์ต้นฉบับ
+-- ไม่ต้องรันในชุดติดตั้งใหม่นี้ เพราะ Part 1 สร้าง users และ user_id ไว้แล้ว
