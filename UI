@@ -1,121 +1,211 @@
 """
-KMITL Classroom Booking - Round 1/4
-โครงสร้างเริ่มต้น: Tkinter UI + ข้อมูลห้องตัวอย่าง
-รัน: python round1_structure.py
+KMITL Classroom Booking - Round 2/4
+เพิ่ม MySQL: จองห้อง, ป้องกันเวลาซ้ำ, ยกเลิก, ดูประวัติ
+ติดตั้ง: pip install mysql-connector-python
+สร้างฐานข้อมูลก่อน: CREATE DATABASE kmitl_classroom_booking CHARACTER SET utf8mb4;
+แก้ DB_CONFIG ให้ตรงกับเครื่อง แล้วรัน python round2_booking.py
 """
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import date
+import mysql.connector
+from mysql.connector import Error
 
-ROOMS = [
-    {"id": 1, "name": "เรียนรวม 101", "building": "อาคารเรียนรวม", "capacity": 40,
-     "equipment": "โปรเจกเตอร์, กระดานไวท์บอร์ด"},
-    {"id": 2, "name": "LAB Computer 1", "building": "อาคารปฏิบัติการ", "capacity": 30,
-     "equipment": "คอมพิวเตอร์, โปรเจกเตอร์"},
-    {"id": 3, "name": "ประชุม 201", "building": "อาคารวิศวกรรม", "capacity": 20,
-     "equipment": "จอแสดงผล, กระดานไวท์บอร์ด"},
-]
+DB_CONFIG = {"host": "localhost", "user": "root", "password": "", "database": "kmitl_classroom_booking"}
 TIME_SLOTS = ["08:00 - 10:00", "10:00 - 12:00", "13:00 - 15:00", "15:00 - 17:00"]
+SEED_ROOMS = [
+    ("เรียนรวม 101", "อาคารเรียนรวม", 40, "โปรเจกเตอร์, กระดานไวท์บอร์ด"),
+    ("LAB Computer 1", "อาคารปฏิบัติการ", 30, "คอมพิวเตอร์, โปรเจกเตอร์"),
+    ("ประชุม 201", "อาคารวิศวกรรม", 20, "จอแสดงผล, กระดานไวท์บอร์ด"),
+]
 
 
-class ClassroomBookingApp:
+class Database:
+    def connect(self):
+        return mysql.connector.connect(**DB_CONFIG)
+
+    def initialize(self):
+        conn = self.connect()
+        cur = conn.cursor()
+        cur.execute("""CREATE TABLE IF NOT EXISTS rooms (
+            id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL UNIQUE,
+            building VARCHAR(100) NOT NULL, capacity INT NOT NULL, equipment TEXT)""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS bookings (
+            id INT AUTO_INCREMENT PRIMARY KEY, room_id INT NOT NULL,
+            booking_date DATE NOT NULL, time_slot VARCHAR(30) NOT NULL,
+            booker_name VARCHAR(150) NOT NULL, attendee_count INT NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT fk_booking_room FOREIGN KEY (room_id) REFERENCES rooms(id),
+            CONSTRAINT uq_room_slot UNIQUE (room_id, booking_date, time_slot))""")
+        cur.execute("SELECT COUNT(*) FROM rooms")
+        if cur.fetchone()[0] == 0:
+            cur.executemany("INSERT INTO rooms(name,building,capacity,equipment) VALUES(%s,%s,%s,%s)", SEED_ROOMS)
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    def rooms(self):
+        conn = self.connect()
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM rooms ORDER BY name")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return rows
+
+    def create_booking(self, room_id, booking_date, slot, name, attendees):
+        conn = self.connect()
+        cur = conn.cursor()
+        try:
+            cur.execute("""INSERT INTO bookings(room_id,booking_date,time_slot,booker_name,attendee_count)
+                           VALUES(%s,%s,%s,%s,%s)""", (room_id, booking_date, slot, name, attendees))
+            conn.commit()
+            return True, "บันทึกการจองเรียบร้อย"
+        except mysql.connector.IntegrityError:
+            conn.rollback()
+            return False, "ช่วงเวลานี้มีผู้จองห้องแล้ว กรุณาเลือกเวลาอื่น"
+        finally:
+            cur.close()
+            conn.close()
+
+    def bookings(self):
+        conn = self.connect()
+        cur = conn.cursor(dictionary=True)
+        cur.execute("""SELECT b.id, r.name AS room_name, b.booking_date, b.time_slot,
+                              b.booker_name, b.attendee_count, b.created_at
+                       FROM bookings b JOIN rooms r ON r.id=b.room_id
+                       ORDER BY b.booking_date DESC, b.time_slot""")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return rows
+
+    def cancel(self, booking_id):
+        conn = self.connect()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM bookings WHERE id=%s", (booking_id,))
+        deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        return deleted > 0
+
+
+class BookingApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("KMITL Classroom Booking - Round 1")
-        self.root.geometry("1000x650")
-        self.root.minsize(850, 550)
-        self.root.configure(bg="#F3F6FB")
-        self.selected_room = None
-        self.booking_date = tk.StringVar(value=date.today().isoformat())
-        self.booking_time = tk.StringVar(value=TIME_SLOTS[0])
+        root.title("KMITL Classroom Booking - Round 2")
+        root.geometry("1050x680")
+        self.db = Database()
+        self.rooms = []
+        self.room_by_id = {}
         self.build_ui()
-        self.load_rooms()
+        self.initialize_data()
 
     def build_ui(self):
-        header = tk.Frame(self.root, bg="#173B70", height=90)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        tk.Label(header, text="KMITL CLASSROOM BOOKING", bg="#173B70",
-                 fg="white", font=("Tahoma", 21, "bold")).pack(anchor="w", padx=25, pady=(15, 2))
-        tk.Label(header, text="ระบบจองห้องเรียนและห้องปฏิบัติการ | Round 1/4",
-                 bg="#173B70", fg="#DCE8FA", font=("Tahoma", 10)).pack(anchor="w", padx=28)
+        tk.Label(self.root, text="KMITL CLASSROOM BOOKING | ROUND 2/4",
+                 font=("Tahoma", 18, "bold"), bg="#173B70", fg="white", pady=18).pack(fill="x")
+        tabs = ttk.Notebook(self.root)
+        tabs.pack(fill="both", expand=True, padx=15, pady=15)
+        self.book_tab = tk.Frame(tabs, padx=20, pady=20)
+        self.history_tab = tk.Frame(tabs, padx=20, pady=20)
+        tabs.add(self.book_tab, text="จองห้องเรียน")
+        tabs.add(self.history_tab, text="รายการจองทั้งหมด")
 
-        body = tk.Frame(self.root, bg="#F3F6FB")
-        body.pack(fill="both", expand=True, padx=20, pady=20)
+        tk.Label(self.book_tab, text="ชื่อผู้จอง").grid(row=0, column=0, sticky="w", pady=7)
+        self.name_var = tk.StringVar()
+        ttk.Entry(self.book_tab, textvariable=self.name_var, width=38).grid(row=0, column=1, sticky="w")
+        tk.Label(self.book_tab, text="เลือกห้อง").grid(row=1, column=0, sticky="w", pady=7)
+        self.room_var = tk.StringVar()
+        self.room_combo = ttk.Combobox(self.book_tab, textvariable=self.room_var, state="readonly", width=35)
+        self.room_combo.grid(row=1, column=1, sticky="w")
+        tk.Label(self.book_tab, text="วันที่ (YYYY-MM-DD)").grid(row=2, column=0, sticky="w", pady=7)
+        self.date_var = tk.StringVar(value=date.today().isoformat())
+        ttk.Entry(self.book_tab, textvariable=self.date_var, width=38).grid(row=2, column=1, sticky="w")
+        tk.Label(self.book_tab, text="ช่วงเวลา").grid(row=3, column=0, sticky="w", pady=7)
+        self.slot_var = tk.StringVar(value=TIME_SLOTS[0])
+        ttk.Combobox(self.book_tab, textvariable=self.slot_var, values=TIME_SLOTS,
+                     state="readonly", width=35).grid(row=3, column=1, sticky="w")
+        tk.Label(self.book_tab, text="จำนวนผู้เข้าใช้").grid(row=4, column=0, sticky="w", pady=7)
+        self.att_var = tk.StringVar(value="1")
+        ttk.Entry(self.book_tab, textvariable=self.att_var, width=38).grid(row=4, column=1, sticky="w")
+        tk.Button(self.book_tab, text="ยืนยันการจอง", command=self.book,
+                  bg="#2457A6", fg="white", relief="flat", padx=18, pady=8).grid(row=5, column=1, sticky="w", pady=18)
 
-        left = tk.Frame(body, bg="white", highlightbackground="#DCE3EE", highlightthickness=1)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 12))
-        tk.Label(left, text="รายการห้องเรียน", bg="white", fg="#172B4D",
-                 font=("Tahoma", 15, "bold")).pack(anchor="w", padx=16, pady=16)
+        cols = ("id", "room", "date", "slot", "name", "attendees")
+        self.history = ttk.Treeview(self.history_tab, columns=cols, show="headings")
+        for col, title, width in zip(cols, ["รหัส", "ห้อง", "วันที่", "เวลา", "ผู้จอง", "จำนวนคน"],
+                                     [60, 180, 120, 130, 180, 90]):
+            self.history.heading(col, text=title)
+            self.history.column(col, width=width, anchor="center")
+        self.history.pack(fill="both", expand=True)
+        tk.Button(self.history_tab, text="ยกเลิกรายการที่เลือก", command=self.cancel,
+                  bg="#B42318", fg="white", relief="flat", padx=15, pady=7).pack(anchor="e", pady=12)
+        tk.Button(self.history_tab, text="รีเฟรช", command=self.refresh_history).pack(anchor="e")
 
-        self.tree = ttk.Treeview(left, columns=("building", "capacity"), show="tree headings")
-        self.tree.heading("#0", text="ชื่อห้อง")
-        self.tree.heading("building", text="อาคาร")
-        self.tree.heading("capacity", text="ความจุ")
-        self.tree.column("#0", width=180)
-        self.tree.column("building", width=170)
-        self.tree.column("capacity", width=80, anchor="center")
-        self.tree.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-        self.tree.bind("<<TreeviewSelect>>", self.select_room)
+    def initialize_data(self):
+        try:
+            self.db.initialize()
+            self.rooms = self.db.rooms()
+            self.room_by_id = {r["name"]: r for r in self.rooms}
+            self.room_combo["values"] = list(self.room_by_id)
+            if self.rooms:
+                self.room_var.set(self.rooms[0]["name"])
+            self.refresh_history()
+        except Error as exc:
+            messagebox.showerror("เชื่อมต่อฐานข้อมูลไม่สำเร็จ",
+                                 f"{exc}\n\nตรวจสอบ MySQL และ DB_CONFIG ก่อนเปิดโปรแกรม")
 
-        right = tk.Frame(body, bg="white", width=330, highlightbackground="#DCE3EE", highlightthickness=1)
-        right.pack(side="right", fill="y")
-        right.pack_propagate(False)
-        tk.Label(right, text="รายละเอียดการจอง", bg="white", fg="#172B4D",
-                 font=("Tahoma", 15, "bold")).pack(anchor="w", padx=18, pady=18)
-        self.room_label = tk.Label(right, text="ยังไม่ได้เลือกห้อง", bg="white",
-                                   fg="#2457A6", font=("Tahoma", 13, "bold"))
-        self.room_label.pack(anchor="w", padx=18, pady=5)
-        self.info_label = tk.Label(right, text="เลือกห้องจากรายการทางซ้าย",
-                                   bg="white", fg="#596579", justify="left", wraplength=280)
-        self.info_label.pack(anchor="w", padx=18, pady=(0, 20))
+    def book(self):
+        try:
+            name = self.name_var.get().strip()
+            if not name:
+                raise ValueError("กรุณากรอกชื่อผู้จอง")
+            room = self.room_by_id.get(self.room_var.get())
+            if not room:
+                raise ValueError("กรุณาเลือกห้อง")
+            day = date.fromisoformat(self.date_var.get().strip())
+            if day < date.today():
+                raise ValueError("ไม่สามารถจองวันที่ผ่านมาแล้ว")
+            attendees = int(self.att_var.get())
+            if attendees < 1 or attendees > room["capacity"]:
+                raise ValueError(f'จำนวนผู้เข้าใช้ต้องอยู่ระหว่าง 1 ถึง {room["capacity"]} คน')
+            ok, msg = self.db.create_booking(room["id"], day, self.slot_var.get(), name, attendees)
+            (messagebox.showinfo if ok else messagebox.showwarning)("ผลการจอง", msg)
+            self.refresh_history()
+        except ValueError as exc:
+            messagebox.showwarning("ข้อมูลไม่ถูกต้อง", str(exc))
+        except Error as exc:
+            messagebox.showerror("Database error", str(exc))
 
-        tk.Label(right, text="วันที่ (YYYY-MM-DD)", bg="white",
-                 font=("Tahoma", 10, "bold")).pack(anchor="w", padx=18, pady=(8, 5))
-        ttk.Entry(right, textvariable=self.booking_date).pack(fill="x", padx=18, ipady=5)
-        tk.Label(right, text="ช่วงเวลา", bg="white",
-                 font=("Tahoma", 10, "bold")).pack(anchor="w", padx=18, pady=(15, 5))
-        ttk.Combobox(right, textvariable=self.booking_time, values=TIME_SLOTS,
-                     state="readonly").pack(fill="x", padx=18, ipady=4)
-        tk.Button(right, text="ทดลองเลือกเวลาจอง", command=self.preview_booking,
-                  bg="#2457A6", fg="white", relief="flat",
-                  font=("Tahoma", 11, "bold"), cursor="hand2").pack(fill="x", padx=18, pady=25, ipady=9)
+    def refresh_history(self):
+        for item in self.history.get_children():
+            self.history.delete(item)
+        try:
+            for b in self.db.bookings():
+                self.history.insert("", "end", iid=str(b["id"]),
+                    values=(b["id"], b["room_name"], b["booking_date"], b["time_slot"],
+                            b["booker_name"], b["attendee_count"]))
+        except Error as exc:
+            messagebox.showerror("Database error", str(exc))
 
-        tk.Label(self.root, text="Round 1: โครงสร้างหน้าจอและข้อมูลตัวอย่าง ยังไม่เชื่อมต่อฐานข้อมูล",
-                 bg="#E8EEF8", fg="#64748B", font=("Tahoma", 9)).pack(fill="x", side="bottom", pady=8)
-
-    def load_rooms(self):
-        for room in ROOMS:
-            self.tree.insert("", "end", iid=str(room["id"]),
-                             text=room["name"],
-                             values=(room["building"], f'{room["capacity"]} คน'))
-
-    def select_room(self, _event=None):
-        selected = self.tree.selection()
+    def cancel(self):
+        selected = self.history.selection()
         if not selected:
+            messagebox.showwarning("แจ้งเตือน", "เลือกรายการที่ต้องการยกเลิก")
             return
-        self.selected_room = next(r for r in ROOMS if r["id"] == int(selected[0]))
-        r = self.selected_room
-        self.room_label.config(text=r["name"])
-        self.info_label.config(text=f'อาคาร: {r["building"]}\nความจุ: {r["capacity"]} คน\nอุปกรณ์: {r["equipment"]}')
-
-    def preview_booking(self):
-        if not self.selected_room:
-            messagebox.showwarning("แจ้งเตือน", "กรุณาเลือกห้องก่อน")
+        if not messagebox.askyesno("ยืนยัน", "ต้องการยกเลิกรายการนี้หรือไม่?"):
             return
         try:
-            date.fromisoformat(self.booking_date.get().strip())
-        except ValueError:
-            messagebox.showerror("วันที่ไม่ถูกต้อง", "กรุณากรอกวันที่แบบ YYYY-MM-DD")
-            return
-        messagebox.showinfo("ตัวอย่างการจอง",
-                            f'ห้อง: {self.selected_room["name"]}\nวันที่: {self.booking_date.get()}\n'
-                            f'เวลา: {self.booking_time.get()}\n\nรอบ 2 จะเพิ่มการบันทึกลง MySQL')
+            if self.db.cancel(int(selected[0])):
+                messagebox.showinfo("สำเร็จ", "ยกเลิกการจองแล้ว")
+            self.refresh_history()
+        except Error as exc:
+            messagebox.showerror("Database error", str(exc))
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    ClassroomBookingApp(root)
+    BookingApp(root)
     root.mainloop()
-
 
