@@ -1,1 +1,121 @@
+"""
+KMITL Classroom Booking - Round 1/4
+โครงสร้างเริ่มต้น: Tkinter UI + ข้อมูลห้องตัวอย่าง
+รัน: python round1_structure.py
+"""
+import tkinter as tk
+from tkinter import ttk, messagebox
+from datetime import date
+
+ROOMS = [
+    {"id": 1, "name": "เรียนรวม 101", "building": "อาคารเรียนรวม", "capacity": 40,
+     "equipment": "โปรเจกเตอร์, กระดานไวท์บอร์ด"},
+    {"id": 2, "name": "LAB Computer 1", "building": "อาคารปฏิบัติการ", "capacity": 30,
+     "equipment": "คอมพิวเตอร์, โปรเจกเตอร์"},
+    {"id": 3, "name": "ประชุม 201", "building": "อาคารวิศวกรรม", "capacity": 20,
+     "equipment": "จอแสดงผล, กระดานไวท์บอร์ด"},
+]
+TIME_SLOTS = ["08:00 - 10:00", "10:00 - 12:00", "13:00 - 15:00", "15:00 - 17:00"]
+
+
+class ClassroomBookingApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("KMITL Classroom Booking - Round 1")
+        self.root.geometry("1000x650")
+        self.root.minsize(850, 550)
+        self.root.configure(bg="#F3F6FB")
+        self.selected_room = None
+        self.booking_date = tk.StringVar(value=date.today().isoformat())
+        self.booking_time = tk.StringVar(value=TIME_SLOTS[0])
+        self.build_ui()
+        self.load_rooms()
+
+    def build_ui(self):
+        header = tk.Frame(self.root, bg="#173B70", height=90)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        tk.Label(header, text="KMITL CLASSROOM BOOKING", bg="#173B70",
+                 fg="white", font=("Tahoma", 21, "bold")).pack(anchor="w", padx=25, pady=(15, 2))
+        tk.Label(header, text="ระบบจองห้องเรียนและห้องปฏิบัติการ | Round 1/4",
+                 bg="#173B70", fg="#DCE8FA", font=("Tahoma", 10)).pack(anchor="w", padx=28)
+
+        body = tk.Frame(self.root, bg="#F3F6FB")
+        body.pack(fill="both", expand=True, padx=20, pady=20)
+
+        left = tk.Frame(body, bg="white", highlightbackground="#DCE3EE", highlightthickness=1)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 12))
+        tk.Label(left, text="รายการห้องเรียน", bg="white", fg="#172B4D",
+                 font=("Tahoma", 15, "bold")).pack(anchor="w", padx=16, pady=16)
+
+        self.tree = ttk.Treeview(left, columns=("building", "capacity"), show="tree headings")
+        self.tree.heading("#0", text="ชื่อห้อง")
+        self.tree.heading("building", text="อาคาร")
+        self.tree.heading("capacity", text="ความจุ")
+        self.tree.column("#0", width=180)
+        self.tree.column("building", width=170)
+        self.tree.column("capacity", width=80, anchor="center")
+        self.tree.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        self.tree.bind("<<TreeviewSelect>>", self.select_room)
+
+        right = tk.Frame(body, bg="white", width=330, highlightbackground="#DCE3EE", highlightthickness=1)
+        right.pack(side="right", fill="y")
+        right.pack_propagate(False)
+        tk.Label(right, text="รายละเอียดการจอง", bg="white", fg="#172B4D",
+                 font=("Tahoma", 15, "bold")).pack(anchor="w", padx=18, pady=18)
+        self.room_label = tk.Label(right, text="ยังไม่ได้เลือกห้อง", bg="white",
+                                   fg="#2457A6", font=("Tahoma", 13, "bold"))
+        self.room_label.pack(anchor="w", padx=18, pady=5)
+        self.info_label = tk.Label(right, text="เลือกห้องจากรายการทางซ้าย",
+                                   bg="white", fg="#596579", justify="left", wraplength=280)
+        self.info_label.pack(anchor="w", padx=18, pady=(0, 20))
+
+        tk.Label(right, text="วันที่ (YYYY-MM-DD)", bg="white",
+                 font=("Tahoma", 10, "bold")).pack(anchor="w", padx=18, pady=(8, 5))
+        ttk.Entry(right, textvariable=self.booking_date).pack(fill="x", padx=18, ipady=5)
+        tk.Label(right, text="ช่วงเวลา", bg="white",
+                 font=("Tahoma", 10, "bold")).pack(anchor="w", padx=18, pady=(15, 5))
+        ttk.Combobox(right, textvariable=self.booking_time, values=TIME_SLOTS,
+                     state="readonly").pack(fill="x", padx=18, ipady=4)
+        tk.Button(right, text="ทดลองเลือกเวลาจอง", command=self.preview_booking,
+                  bg="#2457A6", fg="white", relief="flat",
+                  font=("Tahoma", 11, "bold"), cursor="hand2").pack(fill="x", padx=18, pady=25, ipady=9)
+
+        tk.Label(self.root, text="Round 1: โครงสร้างหน้าจอและข้อมูลตัวอย่าง ยังไม่เชื่อมต่อฐานข้อมูล",
+                 bg="#E8EEF8", fg="#64748B", font=("Tahoma", 9)).pack(fill="x", side="bottom", pady=8)
+
+    def load_rooms(self):
+        for room in ROOMS:
+            self.tree.insert("", "end", iid=str(room["id"]),
+                             text=room["name"],
+                             values=(room["building"], f'{room["capacity"]} คน'))
+
+    def select_room(self, _event=None):
+        selected = self.tree.selection()
+        if not selected:
+            return
+        self.selected_room = next(r for r in ROOMS if r["id"] == int(selected[0]))
+        r = self.selected_room
+        self.room_label.config(text=r["name"])
+        self.info_label.config(text=f'อาคาร: {r["building"]}\nความจุ: {r["capacity"]} คน\nอุปกรณ์: {r["equipment"]}')
+
+    def preview_booking(self):
+        if not self.selected_room:
+            messagebox.showwarning("แจ้งเตือน", "กรุณาเลือกห้องก่อน")
+            return
+        try:
+            date.fromisoformat(self.booking_date.get().strip())
+        except ValueError:
+            messagebox.showerror("วันที่ไม่ถูกต้อง", "กรุณากรอกวันที่แบบ YYYY-MM-DD")
+            return
+        messagebox.showinfo("ตัวอย่างการจอง",
+                            f'ห้อง: {self.selected_room["name"]}\nวันที่: {self.booking_date.get()}\n'
+                            f'เวลา: {self.booking_time.get()}\n\nรอบ 2 จะเพิ่มการบันทึกลง MySQL')
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    ClassroomBookingApp(root)
+    root.mainloop()
+
 
