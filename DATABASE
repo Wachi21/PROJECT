@@ -1,1 +1,114 @@
+SET NAMES utf8mb4;
 
+DROP DATABASE IF EXISTS project;
+
+CREATE DATABASE project
+    CHARACTER SET utf8mb4
+    COLLATE utf8mb4_unicode_ci;
+
+USE project;
+
+-- 0) users: บัญชีผู้ใช้ (นักศึกษา / อาจารย์)
+CREATE TABLE IF NOT EXISTS users (
+    user_id       INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    role          ENUM('student','teacher') NOT NULL COMMENT 'student = นักศึกษา, teacher = อาจารย์',
+    first_name    VARCHAR(50)  NOT NULL,
+    last_name     VARCHAR(50)  NOT NULL,
+    email         VARCHAR(100) NOT NULL COMMENT 'เก็บเป็นตัวพิมพ์เล็ก',
+    password_hash VARCHAR(255) NOT NULL COMMENT 'pbkdf2_sha256$รอบ$salt$hash',
+    created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id),
+    UNIQUE KEY uq_user_email (email),
+    UNIQUE KEY uq_user_name (first_name, last_name)
+) ENGINE=InnoDB;
+
+-- 1) rooms: ห้องเรียน
+CREATE TABLE IF NOT EXISTS rooms (
+    room_id    VARCHAR(20)  NOT NULL,
+    room_name  VARCHAR(100) NOT NULL,
+    building   VARCHAR(100) NOT NULL,
+    capacity   SMALLINT UNSIGNED NULL,
+    color      CHAR(7)      NULL COMMENT 'สีประจำห้องที่ใช้ในแอป เช่น #E4572E',
+    PRIMARY KEY (room_id)
+) ENGINE=InnoDB;
+
+-- 2) time_slots: คาบเวลา (รายชั่วโมง 08:00 - 18:00)
+CREATE TABLE IF NOT EXISTS time_slots (
+    slot_id    CHAR(4)      NOT NULL COMMENT 'เช่น 0800',
+    start_time TIME         NOT NULL,
+    end_time   TIME         NOT NULL,
+    slot_label VARCHAR(20)  NOT NULL COMMENT 'เช่น 08:00 – 09:00',
+    PRIMARY KEY (slot_id)
+) ENGINE=InnoDB;
+
+-- 3) bookings: การจองที่มีผลอยู่ในปัจจุบัน
+-- UNIQUE (room_id, booking_date, slot_id) กันจองซ้ำคาบเดียวกัน
+CREATE TABLE IF NOT EXISTS bookings (
+    booking_id   INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    room_id      VARCHAR(20)  NOT NULL,
+    booking_date DATE         NOT NULL,
+    slot_id      CHAR(4)      NOT NULL,
+    user_id      INT UNSIGNED NULL COMMENT 'เจ้าของการจอง (บัญชีที่ล็อกอินตอนจอง)',
+    booker_name  VARCHAR(100) NOT NULL,
+    purpose      VARCHAR(255) NOT NULL DEFAULT '',
+    created_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (booking_id),
+    UNIQUE KEY uq_room_date_slot (room_id, booking_date, slot_id),
+    KEY idx_booking_date (booking_date),
+    KEY idx_booking_user (user_id),
+    CONSTRAINT fk_bookings_room
+        FOREIGN KEY (room_id) REFERENCES rooms (room_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT fk_bookings_slot
+        FOREIGN KEY (slot_id) REFERENCES time_slots (slot_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT fk_bookings_user
+        FOREIGN KEY (user_id) REFERENCES users (user_id)
+        ON UPDATE CASCADE ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- 4) history: ประวัติการจอง/ยกเลิก
+-- ไม่เชื่อมกับ bookings เพราะแถวใน bookings ถูกลบตอนยกเลิก
+-- เก็บ room_name / slot_label เป็นสำเนาเพื่อรักษาข้อมูล ณ เวลาที่เกิดเหตุการณ์
+CREATE TABLE IF NOT EXISTS history (
+    history_id   INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    room_id      VARCHAR(20)  NOT NULL,
+    room_name    VARCHAR(100) NOT NULL,
+    booking_date DATE         NOT NULL,
+    slot_id      CHAR(4)      NULL,
+    slot_label   VARCHAR(20)  NOT NULL,
+    booker_name  VARCHAR(100) NOT NULL,
+    purpose      VARCHAR(255) NOT NULL DEFAULT '',
+    action       ENUM('จอง','ยกเลิก') NOT NULL,
+    logged_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (history_id),
+    KEY idx_history_logged_at (logged_at),
+    CONSTRAINT fk_history_room
+        FOREIGN KEY (room_id) REFERENCES rooms (room_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT fk_history_slot
+        FOREIGN KEY (slot_id) REFERENCES time_slots (slot_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB;
+
+-- ข้อมูลตั้งต้น: ห้องเรียน
+INSERT IGNORE INTO rooms (room_id, room_name, building, capacity, color) VALUES
+    ('r12-201', 'ห้อง 12-201',       'อาคารเรียนรวม 12',          60, '#E4572E'),
+    ('r12-305', 'ห้อง 12-305',       'อาคารเรียนรวม 12',          40, '#1B998B'),
+    ('r15-101', 'ห้อง 15-101',       'อาคารเรียนรวม 15',          80, '#F2A300'),
+    ('r15-210', 'ห้อง 15-210',       'อาคารเรียนรวม 15',          35, '#4B3F72'),
+    ('r-lab-a', 'ห้องปฏิบัติการ A',  'อาคารวิศวกรรมคอมพิวเตอร์',  30, '#C4436B'),
+    ('r-semi',  'ห้องสัมมนา',        'อาคารวิศวกรรมคอมพิวเตอร์',  20, '#2E8B57');
+
+-- ข้อมูลตั้งต้น: คาบเวลา
+INSERT IGNORE INTO time_slots (slot_id, start_time, end_time, slot_label) VALUES
+    ('0800', '08:00:00', '09:00:00', '08:00 – 09:00'),
+    ('0900', '09:00:00', '10:00:00', '09:00 – 10:00'),
+    ('1000', '10:00:00', '11:00:00', '10:00 – 11:00'),
+    ('1100', '11:00:00', '12:00:00', '11:00 – 12:00'),
+    ('1200', '12:00:00', '13:00:00', '12:00 – 13:00'),
+    ('1300', '13:00:00', '14:00:00', '13:00 – 14:00'),
+    ('1400', '14:00:00', '15:00:00', '14:00 – 15:00'),
+    ('1500', '15:00:00', '16:00:00', '15:00 – 16:00'),
+    ('1600', '16:00:00', '17:00:00', '16:00 – 17:00'),
+    ('1700', '17:00:00', '18:00:00', '17:00 – 18:00');
