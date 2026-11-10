@@ -112,3 +112,60 @@ INSERT IGNORE INTO time_slots (slot_id, start_time, end_time, slot_label) VALUES
     ('1500', '15:00:00', '16:00:00', '15:00 – 16:00'),
     ('1600', '16:00:00', '17:00:00', '16:00 – 17:00'),
     ('1700', '17:00:00', '18:00:00', '17:00 – 18:00');
+
+
+
+
+USE project;
+
+-- equipment: รายการอุปกรณ์/สิ่งอำนวยความสะดวกทั้งหมด
+CREATE TABLE IF NOT EXISTS equipment (
+    equipment_id   VARCHAR(20) NOT NULL,
+    equipment_name VARCHAR(60) NOT NULL,
+    PRIMARY KEY (equipment_id)
+) ENGINE=InnoDB;
+
+-- room_equipment: ห้องไหนมีอุปกรณ์อะไรกี่ชิ้น (many-to-many)
+CREATE TABLE IF NOT EXISTS room_equipment (
+    room_id      VARCHAR(20) NOT NULL,
+    equipment_id VARCHAR(20) NOT NULL,
+    quantity     TINYINT UNSIGNED NOT NULL DEFAULT 1,
+    PRIMARY KEY (room_id, equipment_id),
+    CONSTRAINT fk_re_room
+        FOREIGN KEY (room_id) REFERENCES rooms (room_id)
+        ON UPDATE CASCADE ON DELETE CASCADE,
+    CONSTRAINT fk_re_equipment
+        FOREIGN KEY (equipment_id) REFERENCES equipment (equipment_id)
+        ON UPDATE CASCADE ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- booking_details: ข้อมูลเพิ่มเติมของการจอง (1 การจอง : 1 แถว)
+-- ถ้ายกเลิกการจอง แถวนี้จะถูกลบตามอัตโนมัติ
+CREATE TABLE IF NOT EXISTS booking_details (
+    booking_id  INT UNSIGNED NOT NULL,
+    booker_code VARCHAR(20)  NULL COMMENT 'รหัสนักศึกษา/พนักงาน',
+    phone       VARCHAR(20)  NULL,
+    attendees   SMALLINT UNSIGNED NULL COMMENT 'จำนวนผู้เข้าใช้ห้อง',
+    PRIMARY KEY (booking_id),
+    CONSTRAINT fk_bd_booking
+        FOREIGN KEY (booking_id) REFERENCES bookings (booking_id)
+        ON UPDATE CASCADE ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- ข้อมูลตั้งต้น: อุปกรณ์
+INSERT IGNORE INTO equipment (equipment_id, equipment_name) VALUES
+    ('projector',  'โปรเจกเตอร์'),
+    ('aircon',     'เครื่องปรับอากาศ'),
+    ('whiteboard', 'ไวท์บอร์ด'),
+    ('mic',        'ไมโครโฟน/ลำโพง'),
+    ('pc',         'คอมพิวเตอร์'),
+    ('wifi',       'Wi-Fi');
+
+-- ข้อมูลตั้งต้น: อุปกรณ์ประจำห้อง
+INSERT IGNORE INTO room_equipment (room_id, equipment_id, quantity) VALUES
+    ('r12-201', 'projector', 1), ('r12-201', 'aircon', 2), ('r12-201', 'whiteboard', 2), ('r12-201', 'mic', 1),
+    ('r12-305', 'projector', 1), ('r12-305', 'aircon', 2), ('r12-305', 'whiteboard', 1),
+    ('r15-101', 'projector', 2), ('r15-101', 'aircon', 4), ('r15-101', 'whiteboard', 2), ('r15-101', 'mic', 2),
+    ('r15-210', 'projector', 1), ('r15-210', 'aircon', 2), ('r15-210', 'whiteboard', 1),
+    ('r-lab-a', 'pc', 30), ('r-lab-a', 'projector', 1), ('r-lab-a', 'aircon', 2), ('r-lab-a', 'wifi', 1),
+    ('r-semi',  'projector', 1), ('r-semi',  'aircon', 1), ('r-semi',  'whiteboard', 1), ('r-semi', 'wifi', 1);
