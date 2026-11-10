@@ -1,1 +1,1365 @@
+"""
+KMITL Classroom Booking - Desktop App v3 (มีระบบสมาชิก + หน้าตาใหม่)
+เขียนด้วย Python + Tkinter + MySQL
+
+สิ่งที่เพิ่มในเวอร์ชันนี้:
+    - สมัครสมาชิก แยกเป็น "นักศึกษา" / "อาจารย์" (ชื่อ นามสกุล อีเมล รหัสผ่าน)
+    - เข้าสู่ระบบด้วย "ชื่อ นามสกุล" หรือ "อีเมล" + รหัสผ่าน
+    - รหัสผ่านเก็บแบบเข้ารหัส (PBKDF2-SHA256 + salt) ไม่เก็บรหัสผ่านจริง
+    - การจองผูกกับบัญชี ยกเลิกได้เฉพาะการจองของตัวเอง
+    - หน้า "การจองของฉัน" และดีไซน์ UI ใหม่ทั้งหมด
+
+เตรียมก่อนรัน:
+    1) pip install mysql-connector-python
+    2) รันไฟล์ classroom_booking_mysql.sql (ฉบับใหม่) ใน MySQL Workbench
+    3) ใส่รหัสผ่าน MySQL ใน MYSQL_CONFIG (หรือตั้งตัวแปรสภาพแวดล้อม DB_PASSWORD)
+
+วิธีรัน:
+    python projectxworkbench.py
+"""
+
+import hashlib
+import hmac
+import os
+import re
+import tkinter as tk
+from tkinter import ttk, messagebox
+from datetime import date, timedelta
+
+try:
+    import mysql.connector
+except ImportError:      # ยังไม่ได้ติดตั้ง จะแจ้งเตือนตอนเปิดแอป
+    mysql = None
+
+# ---------------------------------------------------------------------------
+# ข้อมูลตั้งต้น (จะถูกแทนที่ด้วยข้อมูลจากฐานข้อมูลตอนเปิดแอป)
+# ---------------------------------------------------------------------------
+ROOMS = [
+    {"id": "r12-201", "name": "ห้อง 12-201", "building": "อาคารเรียนรวม 12", "color": "#E4572E"},
+]
+ROOM_BY_ID = {r["id"]: r for r in ROOMS}
+TIME_SLOTS = [{"id": "0800", "label": "08:00 – 09:00"}]
+
+DAYS_AHEAD = 14
+ROOM_COLS = 6
+THAI_WEEKDAYS = ["จ.", "อ.", "พ.", "พฤ.", "ศ.", "ส.", "อา."]
+THAI_MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+               "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."]
+
+# ---------------------------------------------------------------------------
+# สีของแอป
+# ---------------------------------------------------------------------------
+BG = "#FBF7F0"            # พื้นหลังหลัก ครีมอุ่น
+PANEL = "#FFFFFF"
+INK = "#241A1D"
+MUTED = "#8A7A6E"
+BORDER = "#E6DACA"
+ACCENT = "#7D1934"
+ACCENT_DARK = "#5C0E24"
+ACCENT_LIGHT = "#C4436B"
+GOLD = "#F2A300"
+FREE_BG = "#E9F7EF"       # เขียวอ่อน = ว่าง
+FREE_FG = "#1B7A4B"
+BOOKED_BG = "#FDEFD9"     # ส้มทอง = จองแล้ว
+BOOKED_FG = "#B4650C"
+DANGER = "#A23B2E"
+
+# role -> (ชื่อที่แสดง, ไอคอน, สีประจำบทบาท)
+ROLE_INFO = {
+    "student": ("นักศึกษา", "🎓", "#1B998B"),
+    "teacher": ("อาจารย์", "📚", "#4B3F72"),
+}
+
+FONT = "Tahoma"
+
+
+# ---------------------------------------------------------------------------
+# ฟังก์ชันช่วยเรื่องสี / วันที่
+# ---------------------------------------------------------------------------
+def date_options():
+    today = date.today()
+    days = [today + timedelta(days=i) for i in range(DAYS_AHEAD)]
+    labels = []
+    for i, d in enumerate(days):
+        top = "วันนี้" if i == 0 else THAI_WEEKDAYS[d.weekday()]
+        labels.append(f"{top}\n{d.day} {THAI_MONTHS[d.month - 1]}")
+    return days, labels
+
+
+def mix(hex_color, with_white_ratio):
+    """ผสมสีกับสีขาวเพื่อให้ได้เฉดอ่อนลง"""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    r = int(r + (255 - r) * with_white_ratio)
+    g = int(g + (255 - g) * with_white_ratio)
+    b = int(b + (255 - b) * with_white_ratio)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def hex_to_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def rgb_to_hex(rgb):
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+
+def blend(c1, c2, t):
+    a, b = hex_to_rgb(c1), hex_to_rgb(c2)
+    return rgb_to_hex(tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3)))
+
+
+def draw_gradient(canvas, w, h, c1, c2, vertical=False, steps=60, tag="grad"):
+    for i in range(steps):
+        t0, t1 = i / steps, (i + 1) / steps
+        color = blend(c1, c2, t0)
+        if vertical:
+            canvas.create_rectangle(0, h * t0, w, h * t1 + 1, fill=color, outline=color, tags=tag)
+        else:
+            canvas.create_rectangle(w * t0, 0, w * t1 + 1, h, fill=color, outline=color, tags=tag)
+
+
+def draw_logo(canvas, x, y, tag="grad"):
+    """โลโก้: วงกลมขาวขอบทอง + ปฏิทิน + เครื่องหมายถูก (ซ้ายบนของโลโก้อยู่ที่ x, y)"""
+    canvas.create_oval(x, y, x + 52, y + 52, fill="#FFFFFF", outline="#E4C77E", width=3, tags=tag)
+    canvas.create_rectangle(x + 13, y + 13, x + 39, y + 39, fill="#7D1934", outline="", tags=tag)
+    canvas.create_rectangle(x + 13, y + 13, x + 39, y + 21, fill=GOLD, outline="", tags=tag)
+    canvas.create_rectangle(x + 18, y + 8, x + 21, y + 17, fill=ACCENT_DARK, outline="", tags=tag)
+    canvas.create_rectangle(x + 31, y + 8, x + 34, y + 17, fill=ACCENT_DARK, outline="", tags=tag)
+    canvas.create_line(x + 19, y + 30, x + 25, y + 35, x + 34, y + 25, width=3, fill="white",
+                       capstyle="round", joinstyle="round", tags=tag)
+
+
+def make_app_icon():
+    """สร้างไอคอนแอปด้วย PhotoImage ไม่ต้องใช้ไฟล์รูป"""
+    size = 64
+    img = tk.PhotoImage(width=size, height=size)
+    cx = cy = (size - 1) / 2
+    r = 31
+    for y in range(size):
+        for x in range(size):
+            d2 = (x - cx) ** 2 + (y - cy) ** 2
+            if d2 <= r * r:
+                img.put("#C89B3C" if d2 > (r - 3) ** 2 else "#FFFFFF", (x, y))
+    img.put("#7D1934", to=(16, 20, 48, 50))
+    img.put("#F2A300", to=(16, 20, 48, 29))
+    img.put("#5C0E24", to=(21, 15, 24, 24))
+    img.put("#5C0E24", to=(40, 15, 43, 24))
+    pts = [(22 + t, 36 + t) for t in range(0, 9)] + [(30 + t, 44 - t) for t in range(0, 15)]
+    for px, py in pts:
+        img.put("#FFFFFF", to=(px, py, px + 3, py + 3))
+    return img
+
+
+def bind_mousewheel(canvas):
+    """เลื่อนด้วยลูกกลิ้งเมาส์เฉพาะตอนเมาส์อยู่เหนือ canvas นี้ (รวมการ์ดที่อยู่ข้างใน)"""
+    def _wheel(event):
+        try:
+            w = canvas.winfo_containing(event.x_root, event.y_root)
+            while w is not None and w is not canvas:
+                w = w.master
+            if w is None:
+                return
+            if getattr(event, "num", None) == 4:
+                step = -1
+            elif getattr(event, "num", None) == 5:
+                step = 1
+            else:
+                step = -1 if event.delta > 0 else 1
+            canvas.yview_scroll(step, "units")
+        except tk.TclError:
+            pass
+
+    for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        canvas.bind_all(seq, _wheel, add="+")
+
+
+def bind_click(widget, handler):
+    """ผูกการคลิกกับ widget และลูกทั้งหมด (ใช้กับการ์ดที่คลิกได้ทั้งใบ)"""
+    widget.bind("<Button-1>", lambda e: handler())
+    for child in widget.winfo_children():
+        bind_click(child, handler)
+
+
+def recolor(widget, bg=None, fg_map=None):
+    """เปลี่ยนสีพื้นของ widget และลูกทั้งหมด (ข้าม Frame ที่ทำหน้าที่เป็นแถบสี)"""
+    if getattr(widget, "keep_color", False):
+        return
+    if bg is not None:
+        try:
+            widget.config(bg=bg)
+        except tk.TclError:
+            pass
+    if fg_map and isinstance(widget, tk.Label):
+        kind = getattr(widget, "kind", None)
+        if kind in fg_map:
+            widget.config(fg=fg_map[kind])
+    for child in widget.winfo_children():
+        recolor(child, bg, fg_map)
+
+
+def setup_styles():
+    style = ttk.Style()
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+    style.configure("Treeview", rowheight=30, font=(FONT, 10), background="white",
+                    fieldbackground="white", foreground=INK, bordercolor=BORDER,
+                    borderwidth=0)
+    style.configure("Treeview.Heading", font=(FONT, 10, "bold"), background=ACCENT_DARK,
+                    foreground="white", relief="flat", padding=(8, 8))
+    style.map("Treeview.Heading", background=[("active", ACCENT)])
+    style.map("Treeview", background=[("selected", "#F6D9E1")], foreground=[("selected", INK)])
+
+
+# ---------------------------------------------------------------------------
+# Database (MySQL)
+# ---------------------------------------------------------------------------
+MYSQL_CONFIG = {
+    "host": "localhost",
+    "port": 3306,
+    "user": "root",
+    "password": os.environ.get("DB_PASSWORD", "12345678"),
+    "database": "project",
+    "charset": "utf8mb4",
+}
+
+
+def get_conn():
+    if mysql is None:
+        raise RuntimeError("NO_MYSQL_CONNECTOR")
+    return mysql.connector.connect(**MYSQL_CONFIG)
+
+
+def describe_db_error(err):
+    if str(err) == "NO_MYSQL_CONNECTOR":
+        return ("ยังไม่ได้ติดตั้งไลบรารี mysql-connector-python\n\n"
+                "ติดตั้งด้วยคำสั่ง:\n    pip install mysql-connector-python\n\n"
+                "หรือใน Thonny: Tools > Manage packages")
+    return ("เชื่อมต่อหรืออ่านข้อมูลจาก MySQL ไม่สำเร็จ\n\n"
+            f"{err}\n\n"
+            "ลองตรวจสอบ:\n"
+            "1) MySQL server เปิดอยู่\n"
+            "2) user / password ใน MYSQL_CONFIG (ต้นไฟล์) ถูกต้อง\n"
+            "3) รันไฟล์ classroom_booking_mysql.sql ฉบับใหม่ใน Workbench แล้ว "
+            "(ต้องมีตาราง users)")
+
+
+def _text(value):
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", errors="replace")
+    return value or ""
+
+
+def load_reference_data():
+    """โหลดห้อง อุปกรณ์ และคาบเวลาจากฐานข้อมูล"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """
+            SELECT r.room_id, r.room_name, r.building, r.capacity, r.color,
+                   GROUP_CONCAT(
+                       CONCAT(e.equipment_name, IF(re.quantity > 1, CONCAT(' x', re.quantity), ''))
+                       ORDER BY e.equipment_name SEPARATOR ', '
+                   ) AS equipment
+            FROM rooms r
+            LEFT JOIN room_equipment re ON re.room_id = r.room_id
+            LEFT JOIN equipment e ON e.equipment_id = re.equipment_id
+            GROUP BY r.room_id, r.room_name, r.building, r.capacity, r.color
+            ORDER BY r.building, r.room_name
+            """
+        )
+        rooms = [
+            {
+                "id": row["room_id"],
+                "name": _text(row["room_name"]),
+                "building": _text(row["building"]),
+                "capacity": row["capacity"],
+                "color": _text(row["color"]) or ACCENT,
+                "equipment": _text(row["equipment"]),
+            }
+            for row in cur.fetchall()
+        ]
+        cur.execute("SELECT slot_id, slot_label FROM time_slots ORDER BY start_time")
+        slots = [{"id": row["slot_id"], "label": _text(row["slot_label"])} for row in cur.fetchall()]
+        cur.close()
+    finally:
+        conn.close()
+
+    if rooms:
+        ROOMS[:] = rooms
+        ROOM_BY_ID.clear()
+        ROOM_BY_ID.update({r["id"]: r for r in rooms})
+    if slots:
+        TIME_SLOTS[:] = slots
+
+
+def init_db():
+    load_reference_data()
+
+
+# ----- บัญชีผู้ใช้ ---------------------------------------------------------
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+PBKDF2_ROUNDS = 200_000
+MIN_PASSWORD_LEN = 8
+
+
+def hash_password(password):
+    """เข้ารหัสรหัสผ่านด้วย PBKDF2-SHA256 + salt สุ่มใหม่ทุกครั้ง"""
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ROUNDS)
+    return f"pbkdf2_sha256${PBKDF2_ROUNDS}${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password, stored):
+    try:
+        algo, rounds, salt_hex, hash_hex = stored.split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                                     bytes.fromhex(salt_hex), int(rounds))
+    except (ValueError, AttributeError):
+        return False
+    return hmac.compare_digest(digest.hex(), hash_hex)
+
+
+def create_user(role, first_name, last_name, email, password):
+    """คืน (True, user_id) ถ้าสมัครสำเร็จ / (False, 'email' หรือ 'name') ถ้าซ้ำ"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                INSERT INTO users (role, first_name, last_name, email, password_hash)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (role, first_name, last_name, email.lower(), hash_password(password)),
+            )
+            conn.commit()
+            return True, cur.lastrowid
+        except mysql.connector.IntegrityError as err:
+            conn.rollback()
+            if err.errno == 1062:
+                return False, ("email" if "uq_user_email" in (err.msg or "") else "name")
+            raise
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
+def authenticate(identifier, password):
+    """ล็อกอินด้วย 'ชื่อ นามสกุล' หรือ 'อีเมล' คืน dict ผู้ใช้ หรือ None ถ้าไม่ถูกต้อง"""
+    ident = " ".join(identifier.split())
+    conn = get_conn()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """
+            SELECT user_id, role, first_name, last_name, email, password_hash
+            FROM users
+            WHERE email = %s OR CONCAT(first_name, ' ', last_name) = %s
+            """,
+            (ident.lower(), ident),
+        )
+        rows = cur.fetchall()
+        cur.close()
+    finally:
+        conn.close()
+
+    for row in rows:
+        if verify_password(password, _text(row["password_hash"])):
+            first, last = _text(row["first_name"]), _text(row["last_name"])
+            return {
+                "id": row["user_id"],
+                "role": _text(row["role"]),
+                "first_name": first,
+                "last_name": last,
+                "full_name": f"{first} {last}",
+                "email": _text(row["email"]),
+            }
+    return None
+
+
+# ----- การจอง --------------------------------------------------------------
+def fetch_history(limit=200):
+    conn = get_conn()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """
+            SELECT logged_at, action, room_name, booking_date AS date,
+                   slot_label, booker_name, purpose
+            FROM history ORDER BY history_id DESC LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+    finally:
+        conn.close()
+    for row in rows:
+        row["logged_at"] = str(row["logged_at"])
+        row["date"] = str(row["date"])
+    return rows
+
+
+def fetch_bookings(room_id, iso_date):
+    conn = get_conn()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """
+            SELECT b.booking_id AS id, b.slot_id, b.booking_date AS date,
+                   b.booker_name, b.purpose, b.user_id, u.role AS booker_role,
+                   d.booker_code, d.phone, d.attendees
+            FROM bookings b
+            LEFT JOIN users u ON u.user_id = b.user_id
+            LEFT JOIN booking_details d ON d.booking_id = b.booking_id
+            WHERE b.room_id = %s AND b.booking_date = %s
+            """,
+            (room_id, iso_date),
+        )
+        rows = cur.fetchall()
+        cur.close()
+    finally:
+        conn.close()
+    for row in rows:
+        row["date"] = str(row["date"])
+        row["booker_role"] = _text(row["booker_role"])
+    return {row["slot_id"]: row for row in rows}
+
+
+def fetch_my_bookings(user_id):
+    conn = get_conn()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """
+            SELECT b.booking_id, b.booking_date, s.slot_label, r.room_name, b.purpose
+            FROM bookings b
+            JOIN rooms r      ON r.room_id = b.room_id
+            JOIN time_slots s ON s.slot_id = b.slot_id
+            WHERE b.user_id = %s AND b.booking_date >= CURDATE()
+            ORDER BY b.booking_date, s.start_time
+            """,
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+    finally:
+        conn.close()
+    return rows
+
+
+def insert_booking(room_id, iso_date, slot_id, user_id, name, purpose,
+                   code="", phone="", attendees=None):
+    """คืน True ถ้าจองสำเร็จ / False ถ้ามีคนจองคาบนี้ไปแล้ว"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                INSERT INTO bookings (room_id, booking_date, slot_id, user_id, booker_name, purpose)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (room_id, iso_date, slot_id, user_id, name, purpose),
+            )
+            booking_id = cur.lastrowid
+            if code or phone or attendees is not None:
+                cur.execute(
+                    """
+                    INSERT INTO booking_details (booking_id, booker_code, phone, attendees)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (booking_id, code or None, phone or None, attendees),
+                )
+            conn.commit()
+            return True
+        except mysql.connector.IntegrityError as err:
+            conn.rollback()
+            if err.errno == 1062:      # Duplicate entry = คาบนี้ถูกจองแล้ว
+                return False
+            raise
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
+def delete_booking(booking_id, user_id):
+    """ลบการจองของตัวเองเท่านั้น (trigger ใน MySQL บันทึกประวัติ 'ยกเลิก' ให้เอง)
+    คืน True ถ้าลบได้ / False ถ้าไม่พบหรือไม่ใช่การจองของผู้ใช้คนนี้"""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM bookings WHERE booking_id = %s AND user_id = %s",
+                    (booking_id, user_id))
+        deleted = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return deleted
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Widgets ที่ใช้ซ้ำ
+# ---------------------------------------------------------------------------
+class ColorButton(tk.Button):
+    """ปุ่มสี มี hover"""
+    def __init__(self, parent, color, hover_color=None, fg="white", **kwargs):
+        self.base_color = color
+        self.hover_color = hover_color or mix(color, 0.15)
+        kwargs.setdefault("font", (FONT, 10, "bold"))
+        kwargs.setdefault("padx", 16)
+        kwargs.setdefault("pady", 8)
+        super().__init__(
+            parent, bg=color, fg=fg, activebackground=self.hover_color,
+            activeforeground=fg, relief="flat", bd=0, cursor="hand2", **kwargs
+        )
+        self.bind("<Enter>", lambda e: self.config(bg=self.hover_color))
+        self.bind("<Leave>", lambda e: self.config(bg=self.base_color))
+
+
+class Field(tk.Frame):
+    """ช่องกรอกข้อมูลพร้อมป้ายชื่อ ขอบเปลี่ยนสีเมื่อโฟกัส และปุ่ม 👁 สำหรับช่องรหัสผ่าน"""
+    def __init__(self, parent, label, accent=ACCENT, secret=False, bg=PANEL):
+        super().__init__(parent, bg=bg)
+        tk.Label(self, text=label, font=(FONT, 9, "bold"), bg=bg, fg=MUTED).pack(anchor="w")
+        self.box = tk.Frame(self, bg=BORDER, padx=1, pady=1)
+        self.box.pack(fill="x", pady=(3, 0))
+        inner = tk.Frame(self.box, bg="white")
+        inner.pack(fill="x")
+
+        self.entry = tk.Entry(inner, font=(FONT, 11), relief="flat", bd=0, bg="white",
+                              fg=INK, insertbackground=INK, show="•" if secret else "")
+        if secret:
+            self._hidden = True
+            eye = tk.Label(inner, text="👁", bg="white", fg=MUTED, cursor="hand2",
+                           font=(FONT, 10))
+            eye.pack(side="right", padx=(0, 8))
+            eye.bind("<Button-1>", lambda e: self._toggle())
+        self.entry.pack(side="left", fill="x", expand=True, padx=8, ipady=6)
+        self.entry.bind("<FocusIn>", lambda e: self.box.config(bg=accent))
+        self.entry.bind("<FocusOut>", lambda e: self.box.config(bg=BORDER))
+
+    def _toggle(self):
+        self._hidden = not self._hidden
+        self.entry.config(show="•" if self._hidden else "")
+
+    def get(self):
+        return self.entry.get()
+
+    def set(self, value):
+        self.entry.delete(0, "end")
+        self.entry.insert(0, value)
+
+    def clear(self):
+        self.entry.delete(0, "end")
+
+    def focus(self):
+        self.entry.focus_set()
+
+
+def role_badge(parent, role, bg=PANEL):
+    label, icon, color = ROLE_INFO.get(role, ("", "", MUTED))
+    return tk.Label(parent, text=f" {icon} {label} ", font=(FONT, 8, "bold"),
+                    bg=mix(color, 0.82), fg=color)
+
+
+# ---------------------------------------------------------------------------
+# หน้าเข้าสู่ระบบ / สมัครสมาชิก
+# ---------------------------------------------------------------------------
+class AuthScreen(tk.Frame):
+    def __init__(self, parent, on_login):
+        super().__init__(parent, bg=BG)
+        self.on_login = on_login
+        self.mode = "login"
+        self.role = "student"
+
+        self._build_side_panel()
+
+        right = tk.Frame(self, bg=BG)
+        right.pack(side="left", fill="both", expand=True)
+
+        self.card = tk.Frame(right, bg=PANEL, highlightthickness=1, highlightbackground=BORDER,
+                             padx=34, pady=26)
+        self.card.place(relx=0.5, rely=0.5, anchor="center")
+        self._build_card()
+
+    # ----- แผงซ้าย (กราเดียนต์ + จุดเด่นของแอป) ---------------------------
+    def _build_side_panel(self):
+        canvas = tk.Canvas(self, width=340, highlightthickness=0, bd=0)
+        canvas.pack(side="left", fill="y")
+
+        def draw(event=None):
+            canvas.delete("grad")
+            h = canvas.winfo_height() or 700
+            draw_gradient(canvas, 340, h, ACCENT_DARK, ACCENT_LIGHT, vertical=True)
+            draw_logo(canvas, 36, 40)
+            canvas.create_text(36, 124, anchor="nw", text="KMITL\nClassroom\nBooking",
+                               fill="white", font=(FONT, 26, "bold"), tags="grad")
+            canvas.create_text(36, 270, anchor="nw",
+                               text="จองห้องเรียนออนไลน์\nเลือกห้อง เลือกเวลา จองได้ทันที",
+                               fill="#FBE3E9", font=(FONT, 11), tags="grad")
+            perks = ["🗓  ดูห้องว่างล่วงหน้า 14 วัน", "🔒  จองและยกเลิกได้เฉพาะของตัวเอง",
+                     "📌  ดูการจองของฉันได้ในที่เดียว"]
+            for i, text in enumerate(perks):
+                canvas.create_text(36, max(h - 150, 340) + i * 34, anchor="nw", text=text,
+                                   fill="white", font=(FONT, 10), tags="grad")
+        canvas.bind("<Configure>", draw)
+
+    # ----- การ์ดฟอร์ม -----------------------------------------------------
+    def _build_card(self):
+        for w in self.card.winfo_children():
+            w.destroy()
+
+        title = "ยินดีต้อนรับกลับมา 👋" if self.mode == "login" else "สร้างบัญชีใหม่ ✨"
+        sub = ("เข้าสู่ระบบด้วยชื่อ-นามสกุล หรืออีเมล" if self.mode == "login"
+               else "สมัครสมาชิกก่อน แล้วจึงเข้าจองห้องได้")
+        tk.Label(self.card, text=title, font=(FONT, 17, "bold"), bg=PANEL, fg=INK).pack(anchor="w")
+        tk.Label(self.card, text=sub, font=(FONT, 9), bg=PANEL, fg=MUTED).pack(anchor="w", pady=(2, 14))
+
+        # แท็บ
+        tabs = tk.Frame(self.card, bg=PANEL)
+        tabs.pack(fill="x", pady=(0, 16))
+        for key, text in (("login", "เข้าสู่ระบบ"), ("register", "สมัครสมาชิก")):
+            active = key == self.mode
+            col = tk.Frame(tabs, bg=PANEL)
+            col.pack(side="left", fill="x", expand=True)
+            lbl = tk.Label(col, text=text, font=(FONT, 10, "bold"), bg=PANEL,
+                           fg=ACCENT if active else MUTED, cursor="hand2", pady=6)
+            lbl.pack(fill="x")
+            tk.Frame(col, height=3, bg=ACCENT if active else BORDER).pack(fill="x")
+            lbl.bind("<Button-1>", lambda e, k=key: self.switch(k))
+
+        self.form = tk.Frame(self.card, bg=PANEL, width=430)
+        self.form.pack(fill="x")
+        tk.Frame(self.form, width=430, height=1, bg=PANEL).pack()   # กำหนดความกว้างขั้นต่ำของฟอร์ม
+        if self.mode == "login":
+            self._build_login()
+        else:
+            self._build_register()
+
+    def switch(self, mode, ident=""):
+        self.mode = mode
+        self._build_card()
+        if mode == "login" and ident:
+            self.f_ident.set(ident)
+            self.f_pw.focus()
+
+    # ----- ฟอร์มเข้าสู่ระบบ ------------------------------------------------
+    def _build_login(self):
+        self.f_ident = Field(self.form, "ชื่อ นามสกุล หรือ อีเมล")
+        self.f_ident.pack(fill="x", pady=(0, 12))
+        self.f_pw = Field(self.form, "รหัสผ่าน", secret=True)
+        self.f_pw.pack(fill="x", pady=(0, 18))
+
+        ColorButton(self.form, color=ACCENT, text="เข้าสู่ระบบ  →", pady=10,
+                    command=self.do_login).pack(fill="x")
+
+        link = tk.Label(self.form, text="ยังไม่มีบัญชี?  สมัครสมาชิกที่นี่", font=(FONT, 9),
+                        bg=PANEL, fg=ACCENT, cursor="hand2")
+        link.pack(pady=(14, 0))
+        link.bind("<Button-1>", lambda e: self.switch("register"))
+
+        self.f_ident.focus()
+        for f in (self.f_ident, self.f_pw):
+            f.entry.bind("<Return>", lambda e: self.do_login())
+
+    def do_login(self):
+        ident = self.f_ident.get().strip()
+        pw = self.f_pw.get()
+        if not ident or not pw:
+            messagebox.showwarning("กรอกข้อมูลไม่ครบ", "กรุณากรอกชื่อ-นามสกุลหรืออีเมล และรหัสผ่าน")
+            return
+        try:
+            user = authenticate(ident, pw)
+        except Exception as err:
+            messagebox.showerror("ฐานข้อมูลมีปัญหา", describe_db_error(err))
+            return
+        if user is None:
+            messagebox.showerror("เข้าสู่ระบบไม่สำเร็จ",
+                                 "ชื่อ-นามสกุล/อีเมล หรือรหัสผ่านไม่ถูกต้อง")
+            self.f_pw.clear()
+            self.f_pw.focus()
+            return
+        self.on_login(user)
+
+    # ----- ฟอร์มสมัครสมาชิก ------------------------------------------------
+    def _build_register(self):
+        tk.Label(self.form, text="ฉันคือ", font=(FONT, 9, "bold"), bg=PANEL,
+                 fg=MUTED).pack(anchor="w")
+        picker = tk.Frame(self.form, bg=PANEL)
+        picker.pack(fill="x", pady=(4, 12))
+        self.role_cards = {}
+        for key in ("student", "teacher"):
+            label, icon, color = ROLE_INFO[key]
+            card = tk.Frame(picker, bg=PANEL, highlightthickness=2, cursor="hand2",
+                            padx=10, pady=8)
+            card.pack(side="left", fill="x", expand=True, padx=(0, 8) if key == "student" else 0)
+            tk.Label(card, text=icon, font=(FONT, 18), bg=PANEL).pack(side="left", padx=(0, 8))
+            tk.Label(card, text=label, font=(FONT, 11, "bold"), bg=PANEL, fg=INK).pack(side="left")
+            bind_click(card, lambda k=key: self._set_role(k))
+            self.role_cards[key] = card
+        self._paint_roles()
+
+        names = tk.Frame(self.form, bg=PANEL)
+        names.pack(fill="x", pady=(0, 10))
+        self.f_first = Field(names, "ชื่อ")
+        self.f_first.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.f_last = Field(names, "นามสกุล")
+        self.f_last.pack(side="left", fill="x", expand=True)
+
+        self.f_email = Field(self.form, "อีเมล")
+        self.f_email.pack(fill="x", pady=(0, 10))
+
+        pws = tk.Frame(self.form, bg=PANEL)
+        pws.pack(fill="x", pady=(0, 4))
+        self.f_pw1 = Field(pws, f"รหัสผ่าน (≥ {MIN_PASSWORD_LEN} ตัว)", secret=True)
+        self.f_pw1.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.f_pw2 = Field(pws, "ยืนยันรหัสผ่าน", secret=True)
+        self.f_pw2.pack(side="left", fill="x", expand=True)
+
+        tk.Label(self.form, text="ชื่อและนามสกุลต้องไม่มีเว้นวรรค · ใช้ชื่อ-นามสกุลหรืออีเมลล็อกอินได้",
+                 font=(FONT, 8), bg=PANEL, fg=MUTED).pack(anchor="w", pady=(0, 14))
+
+        ColorButton(self.form, color=ACCENT, text="สร้างบัญชี", pady=10,
+                    command=self.do_register).pack(fill="x")
+
+        self.f_first.focus()
+        for f in (self.f_first, self.f_last, self.f_email, self.f_pw1, self.f_pw2):
+            f.entry.bind("<Return>", lambda e: self.do_register())
+
+    def _set_role(self, key):
+        self.role = key
+        self._paint_roles()
+
+    def _paint_roles(self):
+        for key, card in self.role_cards.items():
+            color = ROLE_INFO[key][2]
+            selected = key == self.role
+            bg = mix(color, 0.88) if selected else PANEL
+            card.config(highlightbackground=color if selected else BORDER,
+                        highlightcolor=color if selected else BORDER, bg=bg)
+            for child in card.winfo_children():
+                child.config(bg=bg)
+
+    def do_register(self):
+        first = self.f_first.get().strip()
+        last = self.f_last.get().strip()
+        email = self.f_email.get().strip().lower()
+        pw1, pw2 = self.f_pw1.get(), self.f_pw2.get()
+
+        def warn(msg):
+            messagebox.showwarning("ข้อมูลไม่ถูกต้อง", msg)
+
+        if not first or not last:
+            return warn("กรุณากรอกชื่อและนามสกุล")
+        if re.search(r"\s", first) or re.search(r"\s", last):
+            return warn("ชื่อและนามสกุลต้องไม่มีเว้นวรรค (กรอกแยกช่องกัน)")
+        if len(first) > 50 or len(last) > 50:
+            return warn("ชื่อหรือนามสกุลยาวเกินไป (สูงสุด 50 ตัวอักษร)")
+        if not EMAIL_RE.match(email) or len(email) > 100:
+            return warn("รูปแบบอีเมลไม่ถูกต้อง เช่น somchai@kmitl.ac.th")
+        if len(pw1) < MIN_PASSWORD_LEN:
+            return warn(f"รหัสผ่านต้องยาวอย่างน้อย {MIN_PASSWORD_LEN} ตัวอักษร")
+        if pw1 != pw2:
+            return warn("รหัสผ่านและช่องยืนยันไม่ตรงกัน")
+
+        try:
+            ok, info = create_user(self.role, first, last, email, pw1)
+        except Exception as err:
+            messagebox.showerror("ฐานข้อมูลมีปัญหา", describe_db_error(err))
+            return
+        if not ok:
+            if info == "email":
+                return warn("อีเมลนี้ถูกใช้สมัครไปแล้ว")
+            return warn("มีบัญชีที่ใช้ชื่อ-นามสกุลนี้อยู่แล้ว\n"
+                        "(ระบบใช้ชื่อ-นามสกุลล็อกอินได้ จึงซ้ำกันไม่ได้)")
+        messagebox.showinfo("สมัครสมาชิกสำเร็จ",
+                            f"ยินดีต้อนรับคุณ {first} {last}\nเข้าสู่ระบบเพื่อเริ่มจองห้องได้เลย")
+        self.switch("login", ident=email)
+
+
+# ---------------------------------------------------------------------------
+# Booking dialog
+# ---------------------------------------------------------------------------
+class BookingDialog(tk.Toplevel):
+    def __init__(self, parent, user, slot_label, room_color, capacity=None):
+        super().__init__(parent)
+        self.user = user
+        self.capacity = capacity
+        self.title("จองห้องเรียน")
+        self.resizable(False, False)
+        self.configure(bg=PANEL)
+        self.result = None
+
+        tk.Frame(self, bg=room_color, height=8).pack(fill="x")
+        body = tk.Frame(self, bg=PANEL, padx=22, pady=18)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(body, text="✏️  จองคาบเวลา", font=(FONT, 10), bg=PANEL, fg=MUTED).pack(anchor="w")
+        tk.Label(body, text=slot_label, font=(FONT, 15, "bold"), bg=PANEL, fg=INK).pack(
+            anchor="w", pady=(0, 12))
+
+        who = tk.Frame(body, bg=mix(room_color, 0.9), padx=12, pady=8)
+        who.pack(fill="x", pady=(0, 14))
+        tk.Label(who, text="ผู้จอง", font=(FONT, 8), bg=who["bg"], fg=MUTED).pack(anchor="w")
+        row = tk.Frame(who, bg=who["bg"])
+        row.pack(anchor="w")
+        tk.Label(row, text=user["full_name"], font=(FONT, 11, "bold"), bg=who["bg"],
+                 fg=INK).pack(side="left", padx=(0, 8))
+        role_badge(row, user["role"]).pack(side="left")
+
+        code_label = "รหัสนักศึกษา *" if user["role"] == "student" else "รหัสอาจารย์ / พนักงาน *"
+        self.code_f = Field(body, code_label, accent=room_color)
+        self.code_f.pack(fill="x", pady=(0, 10))
+        self.phone_f = Field(body, "เบอร์โทรติดต่อ *", accent=room_color)
+        self.phone_f.pack(fill="x", pady=(0, 10))
+        hint = f"  (ห้องนี้จุได้ {capacity})" if capacity else ""
+        self.att_f = Field(body, "จำนวนผู้เข้าใช้ห้อง *" + hint, accent=room_color)
+        self.att_f.pack(fill="x", pady=(0, 10))
+
+        tk.Label(body, text="วัตถุประสงค์ *", font=(FONT, 9, "bold"), bg=PANEL,
+                 fg=MUTED).pack(anchor="w")
+        box = tk.Frame(body, bg=BORDER, padx=1, pady=1)
+        box.pack(fill="x", pady=(3, 16))
+        self.purpose_text = tk.Text(box, width=40, height=3, font=(FONT, 11), relief="flat",
+                                    bd=0, padx=8, pady=6, wrap="word")
+        self.purpose_text.pack(fill="x")
+        self.purpose_text.bind("<FocusIn>", lambda e: box.config(bg=room_color))
+        self.purpose_text.bind("<FocusOut>", lambda e: box.config(bg=BORDER))
+
+        button_row = tk.Frame(body, bg=PANEL)
+        button_row.pack(fill="x")
+        ColorButton(button_row, color=room_color, text="✔ ยืนยันการจอง",
+                    command=self.on_confirm).pack(side="left", padx=(0, 8))
+        tk.Button(button_row, text="ยกเลิก", relief="flat", bd=0, bg="#EDE6DA", fg=INK,
+                  font=(FONT, 10), padx=14, pady=8, cursor="hand2",
+                  command=self.destroy).pack(side="left")
+
+        self.transient(parent)
+        self.grab_set()
+        self.code_f.focus()
+
+    def on_confirm(self):
+        def warn(msg):
+            messagebox.showwarning("กรอกข้อมูลไม่ครบ", msg, parent=self)
+
+        code = self.code_f.get().strip()
+        phone = self.phone_f.get().strip()
+        raw_att = self.att_f.get().strip()
+        purpose = self.purpose_text.get("1.0", "end").strip()
+
+        if not code:
+            return warn("กรุณากรอกรหัสนักศึกษา / รหัสอาจารย์")
+        if not phone:
+            return warn("กรุณากรอกเบอร์โทรติดต่อ")
+        digits = "".join(ch for ch in phone if ch.isdigit())
+        if not set(phone) <= set("0123456789-+ ") or not 9 <= len(digits) <= 10:
+            return warn("เบอร์โทรไม่ถูกต้อง ต้องเป็นตัวเลข 9-10 หลัก เช่น 0812345678")
+        if not raw_att:
+            return warn("กรุณากรอกจำนวนผู้เข้าใช้ห้อง")
+        if not raw_att.isdigit() or int(raw_att) <= 0:
+            return warn("จำนวนผู้เข้าใช้ต้องเป็นตัวเลขจำนวนเต็มมากกว่า 0")
+        attendees = int(raw_att)
+        if self.capacity and attendees > self.capacity:
+            return warn(f"ห้องนี้จุได้สูงสุด {self.capacity} คน")
+        if not purpose:
+            return warn("กรุณากรอกวัตถุประสงค์การใช้ห้อง")
+
+        self.result = {"purpose": purpose, "code": code, "phone": phone, "attendees": attendees}
+        self.destroy()
+
+
+# ---------------------------------------------------------------------------
+# หน้าต่างรายการ (ประวัติ / การจองของฉัน)
+# ---------------------------------------------------------------------------
+def _window_header(win, text, color=ACCENT_DARK):
+    header = tk.Frame(win, bg=color)
+    header.pack(fill="x")
+    tk.Label(header, text=text, font=(FONT, 13, "bold"), bg=color, fg="white",
+             padx=18, pady=12).pack(anchor="w")
+
+
+class HistoryWindow(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("ประวัติการจอง / ยกเลิก")
+        self.geometry("820x460")
+        self.configure(bg=PANEL)
+        self.transient(parent)
+        _window_header(self, "📜  ประวัติการจอง / ยกเลิก (ทุกคน)")
+
+        frame = tk.Frame(self, bg=PANEL)
+        frame.pack(fill="both", expand=True, padx=14, pady=14)
+
+        columns = ("time", "action", "room", "date", "slot", "who", "purpose")
+        tree = ttk.Treeview(frame, columns=columns, show="headings")
+        headings = {
+            "time": ("บันทึกเมื่อ", 140), "action": ("การกระทำ", 70), "room": ("ห้อง", 110),
+            "date": ("วันที่", 90), "slot": ("คาบ", 110), "who": ("ผู้จอง", 120),
+            "purpose": ("วัตถุประสงค์", 160),
+        }
+        for col, (text, width) in headings.items():
+            tree.heading(col, text=text)
+            tree.column(col, width=width, anchor="w")
+        tree.pack(side="left", fill="both", expand=True)
+        bar = ttk.Scrollbar(frame, command=tree.yview)
+        bar.pack(side="right", fill="y")
+        tree.configure(yscrollcommand=bar.set)
+        tree.tag_configure("booked", foreground=FREE_FG)
+        tree.tag_configure("cancelled", foreground=DANGER)
+
+        rows = fetch_history()
+        if not rows:
+            tk.Label(self, text="ยังไม่มีประวัติการจองหรือยกเลิก", bg=PANEL, fg=MUTED,
+                     font=(FONT, 10)).pack(pady=(0, 10))
+        for row in rows:
+            tag = "booked" if row["action"] == "จอง" else "cancelled"
+            tree.insert("", "end", tags=(tag,), values=(
+                row["logged_at"], row["action"], row["room_name"], row["date"],
+                row["slot_label"], row["booker_name"], row["purpose"]))
+
+
+class MyBookingsWindow(tk.Toplevel):
+    def __init__(self, parent, user, on_change):
+        super().__init__(parent)
+        self.user = user
+        self.on_change = on_change
+        self.title("การจองของฉัน")
+        self.geometry("680x440")
+        self.configure(bg=PANEL)
+        self.transient(parent)
+        _window_header(self, f"📌  การจองของฉัน · {user['full_name']}", color="#4B3F72")
+
+        frame = tk.Frame(self, bg=PANEL)
+        frame.pack(fill="both", expand=True, padx=14, pady=(14, 6))
+        columns = ("date", "slot", "room", "purpose")
+        self.tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        for col, (text, width) in {"date": ("วันที่", 100), "slot": ("คาบ", 120),
+                                   "room": ("ห้อง", 130), "purpose": ("วัตถุประสงค์", 260)}.items():
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor="w")
+        self.tree.pack(side="left", fill="both", expand=True)
+        bar = ttk.Scrollbar(frame, command=self.tree.yview)
+        bar.pack(side="right", fill="y")
+        self.tree.configure(yscrollcommand=bar.set)
+
+        self.empty = tk.Label(frame, text="ยังไม่มีการจองที่กำลังจะมาถึง", bg="white", fg=MUTED,
+                              font=(FONT, 10))
+        bottom = tk.Frame(self, bg=PANEL)
+        bottom.pack(fill="x", padx=14, pady=(4, 14))
+        ColorButton(bottom, color=DANGER, text="✖ ยกเลิกรายการที่เลือก", padx=12, pady=6,
+                    font=(FONT, 9, "bold"), command=self.cancel_selected).pack(side="right")
+        self.load()
+
+    def load(self):
+        self.tree.delete(*self.tree.get_children())
+        rows = fetch_my_bookings(self.user["id"])
+        for row in rows:
+            d = row["booking_date"]
+            self.tree.insert("", "end", iid=str(row["booking_id"]), values=(
+                f"{d.day} {THAI_MONTHS[d.month - 1]} {d.year}", _text(row["slot_label"]),
+                _text(row["room_name"]), _text(row["purpose"])))
+        if rows:
+            self.empty.place_forget()
+        else:
+            self.empty.place(relx=0.5, rely=0.55, anchor="center")
+
+    def cancel_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("ยกเลิกการจอง", "เลือกรายการที่ต้องการยกเลิกก่อน", parent=self)
+            return
+        if not messagebox.askyesno("ยืนยัน", "ยกเลิกการจองรายการนี้ใช่หรือไม่?", parent=self):
+            return
+        try:
+            delete_booking(int(sel[0]), self.user["id"])
+            self.load()
+        except Exception as err:
+            messagebox.showerror("ฐานข้อมูลมีปัญหา", describe_db_error(err), parent=self)
+            return
+        self.on_change()
+
+
+# ---------------------------------------------------------------------------
+# หน้าหลักสำหรับจองห้อง
+# ---------------------------------------------------------------------------
+class MainScreen(tk.Frame):
+    def __init__(self, parent, user, on_logout):
+        super().__init__(parent, bg=BG)
+        self.user = user
+        self.on_logout = on_logout
+        self.dates, self.date_labels = date_options()
+        self.selected_room_id = ROOMS[0]["id"]
+        self.selected_date_idx = 0
+
+        self._build_header()
+        self._build_room_rail()
+        self._build_date_strip()
+        self._build_info_card()
+        self._build_slot_list()
+        self._build_footer()
+        self.refresh()
+
+    @property
+    def top(self):
+        return self.winfo_toplevel()
+
+    # ----- Header ---------------------------------------------------------
+    def _build_header(self):
+        canvas = tk.Canvas(self, height=86, highlightthickness=0, bd=0)
+        canvas.pack(fill="x")
+        self.logout_btn = tk.Button(
+            canvas, text="🚪 ออกจากระบบ", font=(FONT, 9, "bold"), bg="white", fg=ACCENT_DARK,
+            activebackground="#FBE3E9", relief="flat", bd=0, padx=12, pady=6, cursor="hand2",
+            command=self.on_logout)
+        label, icon, color = ROLE_INFO[self.user["role"]]
+
+        def draw(event=None):
+            canvas.delete("grad")
+            w = canvas.winfo_width() or 980
+            draw_gradient(canvas, w, 86, ACCENT_DARK, ACCENT_LIGHT)
+            draw_logo(canvas, 18, 17)
+            canvas.create_text(86, 32, anchor="w", text="KMITL Classroom Booking",
+                               fill="white", font=(FONT, 18, "bold"), tags="grad")
+            canvas.create_text(86, 58, anchor="w",
+                               text="จองห้องเรียนออนไลน์ · เลือกห้อง เลือกเวลา จองได้ทันที",
+                               fill="#FBE3E9", font=(FONT, 10), tags="grad")
+            bw = self.logout_btn.winfo_reqwidth()
+            canvas.create_window(w - 18, 43, window=self.logout_btn, anchor="e", tags="grad")
+            cx = w - 18 - bw - 18 - 21
+            canvas.create_oval(cx - 21, 22, cx + 21, 64, fill=color, outline="white", width=2,
+                               tags="grad")
+            canvas.create_text(cx, 43, text=self.user["first_name"][:1], fill="white",
+                               font=(FONT, 15, "bold"), tags="grad")
+            canvas.create_text(cx - 30, 34, anchor="e", text=self.user["full_name"], fill="white",
+                               font=(FONT, 11, "bold"), tags="grad")
+            canvas.create_text(cx - 30, 54, anchor="e", text=f"{icon} {label}", fill="#FBE3E9",
+                               font=(FONT, 9), tags="grad")
+        canvas.bind("<Configure>", draw)
+
+    # ----- เลือกห้อง: การ์ดแต่ละห้อง ---------------------------------------
+    def _build_room_rail(self):
+        wrap = tk.Frame(self, bg=BG)
+        wrap.pack(fill="x", padx=20, pady=(14, 4))
+        tk.Label(wrap, text="ห้องเรียน", font=(FONT, 9, "bold"), bg=BG, fg=MUTED).pack(anchor="w")
+
+        grid = tk.Frame(wrap, bg=BG)
+        grid.pack(fill="x", pady=(4, 0))
+        self.room_cards = {}
+        for i, room in enumerate(ROOMS):
+            r, c = divmod(i, ROOM_COLS)
+            grid.columnconfigure(c, weight=1, uniform="room")
+            card = tk.Frame(grid, bg=PANEL, highlightthickness=1, cursor="hand2")
+            card.grid(row=r, column=c, sticky="nsew", padx=3, pady=3)
+            stripe = tk.Frame(card, height=4, bg=room["color"])
+            stripe.keep_color = True
+            stripe.pack(fill="x")
+            name = tk.Label(card, text=room["name"], font=(FONT, 10, "bold"), bg=PANEL, fg=INK,
+                            anchor="w")
+            name.kind = "title"
+            name.pack(fill="x", padx=10, pady=(6, 0))
+            cap = f"👥 {room['capacity']} ที่นั่ง" if room.get("capacity") else "ห้องเรียน"
+            sub = tk.Label(card, text=cap, font=(FONT, 8), bg=PANEL, fg=MUTED, anchor="w")
+            sub.kind = "sub"
+            sub.pack(fill="x", padx=10, pady=(0, 7))
+            bind_click(card, lambda rid=room["id"]: self.select_room(rid))
+            self.room_cards[room["id"]] = card
+
+    def select_room(self, room_id):
+        self.selected_room_id = room_id
+        self.refresh()
+
+    # ----- เลือกวันที่ ------------------------------------------------------
+    def _build_date_strip(self):
+        wrap = tk.Frame(self, bg=BG)
+        wrap.pack(fill="x", padx=20, pady=(8, 4))
+        tk.Label(wrap, text="วันที่", font=(FONT, 9, "bold"), bg=BG, fg=MUTED).pack(anchor="w")
+
+        outer = tk.Frame(wrap, bg=BG)
+        outer.pack(fill="x", pady=(4, 0))
+        canvas = tk.Canvas(outer, height=54, bg=BG, highlightthickness=0)
+        hbar = ttk.Scrollbar(outer, orient="horizontal", command=canvas.xview)
+        strip = tk.Frame(canvas, bg=BG)
+        strip.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=strip, anchor="nw")
+        canvas.configure(xscrollcommand=hbar.set)
+        canvas.pack(fill="x")
+        hbar.pack(fill="x")
+
+        self.date_buttons = []
+        for idx, label in enumerate(self.date_labels):
+            btn = tk.Button(strip, text=label, font=(FONT, 9, "bold"), relief="flat", bd=0,
+                            padx=12, pady=5, cursor="hand2", width=7,
+                            command=lambda i=idx: self.select_date(i))
+            btn.pack(side="left", padx=3)
+            self.date_buttons.append(btn)
+
+    def select_date(self, idx):
+        self.selected_date_idx = idx
+        self.refresh()
+
+    # ----- การ์ดสรุปห้อง ----------------------------------------------------
+    def _build_info_card(self):
+        self.info = tk.Frame(self, bg=PANEL, highlightthickness=1, highlightbackground=BORDER)
+        self.info.pack(fill="x", padx=20, pady=(8, 4))
+        self.info_stripe = tk.Frame(self.info, width=6)
+        self.info_stripe.pack(side="left", fill="y")
+
+        left = tk.Frame(self.info, bg=PANEL)
+        left.pack(side="left", fill="both", expand=True, padx=14, pady=10)
+        self.info_title = tk.Label(left, text="", font=(FONT, 12, "bold"), bg=PANEL, fg=INK,
+                                   anchor="w")
+        self.info_title.pack(fill="x")
+        self.info_sub = tk.Label(left, text="", font=(FONT, 9), bg=PANEL, fg=MUTED, anchor="w",
+                                 justify="left", wraplength=560)
+        self.info_sub.pack(fill="x", pady=(2, 0))
+
+        right = tk.Frame(self.info, bg=PANEL)
+        right.pack(side="right", padx=14)
+        self.chip_free = tk.Label(right, font=(FONT, 9, "bold"), bg=FREE_BG, fg=FREE_FG,
+                                  padx=10, pady=4)
+        self.chip_free.pack(side="left", padx=(0, 6))
+        self.chip_booked = tk.Label(right, font=(FONT, 9, "bold"), bg=BOOKED_BG, fg=BOOKED_FG,
+                                    padx=10, pady=4)
+        self.chip_booked.pack(side="left")
+
+    # ----- รายการคาบเวลา ----------------------------------------------------
+    def _build_slot_list(self):
+        outer = tk.Frame(self, bg=BG)
+        outer.pack(fill="both", expand=True, padx=20, pady=(6, 4))
+        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
+        vbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        self.list_frame = tk.Frame(canvas, bg=BG)
+        win = canvas.create_window((0, 0), window=self.list_frame, anchor="nw")
+        self.list_frame.bind("<Configure>",
+                             lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win, width=e.width))
+        canvas.configure(yscrollcommand=vbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vbar.pack(side="right", fill="y")
+        bind_mousewheel(canvas)
+
+    def _build_footer(self):
+        bar = tk.Frame(self, bg=BG)
+        bar.pack(fill="x", padx=20, pady=(2, 14))
+        tk.Label(bar, text="🔒 ยกเลิกได้เฉพาะการจองของคุณเอง", font=(FONT, 9), bg=BG,
+                 fg=MUTED).pack(side="left")
+        ColorButton(bar, color="#4B3F72", text="📜 ประวัติทั้งหมด", command=self.open_history,
+                    font=(FONT, 9, "bold"), padx=12, pady=6).pack(side="right")
+        ColorButton(bar, color=GOLD, text="📌 การจองของฉัน", command=self.open_my_bookings,
+                    font=(FONT, 9, "bold"), padx=12, pady=6).pack(side="right", padx=(0, 8))
+
+    # ----- วาดข้อมูลใหม่ -----------------------------------------------------
+    def refresh(self):
+        room = ROOM_BY_ID[self.selected_room_id]
+        iso_date = self.dates[self.selected_date_idx].isoformat()
+        try:
+            bookings = fetch_bookings(self.selected_room_id, iso_date)
+        except Exception as err:
+            self.show_db_error(err)
+            bookings = {}
+
+        for rid, card in self.room_cards.items():
+            color = ROOM_BY_ID[rid]["color"]
+            if rid == self.selected_room_id:
+                card.config(highlightbackground=color)
+                recolor(card, bg=color, fg_map={"title": "white", "sub": "#FBE3E9"})
+            else:
+                card.config(highlightbackground=BORDER)
+                recolor(card, bg=PANEL, fg_map={"title": INK, "sub": MUTED})
+
+        for idx, btn in enumerate(self.date_buttons):
+            if idx == self.selected_date_idx:
+                btn.config(bg=GOLD, fg="white", activebackground=GOLD)
+            else:
+                btn.config(bg="#F1E7D8", fg=INK, activebackground="#E8DAC5")
+
+        for widget in self.list_frame.winfo_children():
+            widget.destroy()
+        free_count = 0
+        for slot in TIME_SLOTS:
+            booking = bookings.get(slot["id"])
+            self._add_slot_row(slot, booking, room["color"])
+            if not booking:
+                free_count += 1
+
+        self.info_stripe.config(bg=room["color"])
+        self.info_title.config(text=f"📍 {room['name']} · {room['building']}")
+        parts = []
+        if room.get("capacity"):
+            parts.append(f"👥 จุ {room['capacity']} ที่นั่ง")
+        if room.get("equipment"):
+            parts.append(f"🛠 {room['equipment']}")
+        self.info_sub.config(text="   ".join(parts) if parts else "ยังไม่มีข้อมูลอุปกรณ์")
+        self.chip_free.config(text=f"🟢 ว่าง {free_count} คาบ")
+        self.chip_booked.config(text=f"🟠 จองแล้ว {len(TIME_SLOTS) - free_count} คาบ")
+
+    def _add_slot_row(self, slot, booking, room_color):
+        is_booked = booking is not None
+        mine = is_booked and booking.get("user_id") == self.user["id"]
+        row_bg = BOOKED_BG if is_booked else FREE_BG
+
+        card = tk.Frame(self.list_frame, bg=row_bg, padx=14, pady=10, highlightthickness=1,
+                        highlightbackground=mix(room_color, 0.6) if is_booked else "#CFE8D9")
+        card.pack(fill="x", pady=4)
+
+        tk.Frame(card, bg=room_color if is_booked else "#9CCFB2", width=5).pack(
+            side="left", fill="y", padx=(0, 12))
+
+        info = tk.Frame(card, bg=row_bg)
+        info.pack(side="left", fill="both", expand=True)
+        top = tk.Frame(info, bg=row_bg)
+        top.pack(fill="x", anchor="w")
+        tk.Label(top, text=slot["label"], font=(FONT, 12, "bold"), bg=row_bg,
+                 fg=INK).pack(side="left")
+        tk.Label(top, text="จองแล้ว" if is_booked else "ว่าง", font=(FONT, 8, "bold"),
+                 bg=BOOKED_FG if is_booked else FREE_FG, fg="white", padx=8,
+                 pady=1).pack(side="left", padx=(10, 0))
+        if mine:
+            tk.Label(top, text="ของคุณ", font=(FONT, 8, "bold"), bg=ACCENT, fg="white",
+                     padx=8, pady=1).pack(side="left", padx=(6, 0))
+
+        if is_booked:
+            role = ROLE_INFO.get(booking.get("booker_role"))
+            who = booking["booker_name"] + (f"  ({role[1]} {role[0]})" if role else "")
+            if booking["purpose"]:
+                who += f" — {booking['purpose']}"
+            lines = [who]
+            if mine:     # เบอร์โทร/รหัส แสดงเฉพาะเจ้าของการจอง
+                extras = []
+                if booking.get("booker_code"):
+                    extras.append(f"🪪 {booking['booker_code']}")
+                if booking.get("attendees"):
+                    extras.append(f"👥 {booking['attendees']} คน")
+                if booking.get("phone"):
+                    extras.append(f"📞 {booking['phone']}")
+                if extras:
+                    lines.append("   ".join(extras))
+            tk.Label(info, text="\n".join(lines), font=(FONT, 9), bg=row_bg, fg=MUTED,
+                     anchor="w", justify="left", wraplength=520).pack(fill="x", anchor="w",
+                                                                      pady=(3, 0))
+
+        action = tk.Frame(card, bg=row_bg)
+        action.pack(side="right")
+        if is_booked and mine:
+            ColorButton(action, color=DANGER, text="✖ ยกเลิกการจอง", padx=12, pady=6,
+                        font=(FONT, 9, "bold"),
+                        command=lambda b=booking: self.cancel_slot(b)).pack()
+        elif is_booked:
+            tk.Label(action, text="🔒 จองโดยผู้อื่น", font=(FONT, 9), bg=row_bg,
+                     fg=MUTED).pack()
+        else:
+            ColorButton(action, color=room_color, text="จองคาบนี้", padx=14, pady=6,
+                        font=(FONT, 9, "bold"),
+                        command=lambda s=slot: self.book_slot(s, room_color)).pack()
+
+    # ----- การกระทำ -----------------------------------------------------------
+    def show_db_error(self, err):
+        messagebox.showerror("ฐานข้อมูลมีปัญหา", describe_db_error(err))
+
+    def book_slot(self, slot, room_color):
+        room = ROOM_BY_ID[self.selected_room_id]
+        dialog = BookingDialog(self.top, self.user, slot["label"], room_color,
+                               room.get("capacity"))
+        self.top.wait_window(dialog)
+        if not dialog.result:
+            return
+        data = dialog.result
+        iso_date = self.dates[self.selected_date_idx].isoformat()
+        try:
+            ok = insert_booking(
+                self.selected_room_id, iso_date, slot["id"], self.user["id"],
+                self.user["full_name"], data["purpose"],
+                code=data["code"], phone=data["phone"], attendees=data["attendees"])
+        except Exception as err:
+            self.show_db_error(err)
+            return
+        if not ok:
+            messagebox.showwarning("จองไม่สำเร็จ", "คาบเวลานี้เพิ่งถูกจองไปแล้ว")
+        self.refresh()
+
+    def cancel_slot(self, booking):
+        if not messagebox.askyesno("ยืนยัน", "ยกเลิกการจองคาบนี้ใช่หรือไม่?"):
+            return
+        try:
+            deleted = delete_booking(booking["id"], self.user["id"])
+        except Exception as err:
+            self.show_db_error(err)
+            return
+        if not deleted:
+            messagebox.showwarning("ยกเลิกไม่ได้", "ไม่พบการจองนี้ หรือไม่ใช่การจองของคุณ")
+        self.refresh()
+
+    def open_history(self):
+        try:
+            HistoryWindow(self.top)
+        except Exception as err:
+            self.show_db_error(err)
+
+    def open_my_bookings(self):
+        try:
+            MyBookingsWindow(self.top, self.user, on_change=self.refresh)
+        except Exception as err:
+            self.show_db_error(err)
+
+
+# ---------------------------------------------------------------------------
+# ตัวควบคุมหน้าจอ: เข้าสู่ระบบ <-> หน้าหลัก
+# ---------------------------------------------------------------------------
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.user = None
+        root.title("KMITL Classroom Booking - จองห้องเรียนออนไลน์")
+        self.app_icon = make_app_icon()
+        root.iconphoto(True, self.app_icon)
+        root.configure(bg=BG)
+        setup_styles()
+        self.show_auth()
+
+    def _clear(self):
+        for w in self.root.winfo_children():
+            w.destroy()
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.root.unbind_all(seq)
+
+    def show_auth(self, confirm=False):
+        if confirm and not messagebox.askyesno("ออกจากระบบ", "ต้องการออกจากระบบใช่หรือไม่?"):
+            return
+        self.user = None
+        self._clear()
+        self.root.minsize(900, 680)
+        self.root.geometry("980x700")
+        AuthScreen(self.root, on_login=self.on_login).pack(fill="both", expand=True)
+
+    def on_login(self, user):
+        self.user = user
+        self._clear()
+        self.root.minsize(900, 700)
+        self.root.geometry("1000x760")
+        MainScreen(self.root, user, on_logout=lambda: self.show_auth(confirm=True)).pack(
+            fill="both", expand=True)
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    try:
+        init_db()
+    except Exception as err:
+        root.withdraw()
+        messagebox.showerror("เชื่อมต่อฐานข้อมูลไม่ได้", describe_db_error(err))
+        root.destroy()
+    else:
+        App(root)
+        root.mainloop()
 
