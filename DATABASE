@@ -1,3 +1,21 @@
+-- =====================================================================
+-- KMITL Classroom Booking - MySQL Database (v3 : มีระบบสมาชิก users)
+-- สำหรับใช้กับ MySQL Workbench (MySQL 8.0+)
+--
+-- วิธีใช้:
+--   1) เปิด MySQL Workbench แล้วเชื่อมต่อ server
+--   2) File > Open SQL Script... เลือกไฟล์นี้
+--   3) กดปุ่มสายฟ้า (Execute) เพื่อรันทั้งไฟล์
+--
+-- *** คำเตือน ***
+-- สคริปต์นี้ "ลบฐานข้อมูล project เดิมทิ้งแล้วสร้างใหม่"
+-- ข้อมูลการจองและประวัติที่มีอยู่ใน MySQL จะหายทั้งหมด
+-- เหมาะกับการติดตั้งใหม่ / ล้างข้อมูลทดสอบ
+--
+-- ตอนกด Execute ให้คลิกในหน้าต่างสคริปต์ให้ไม่มีข้อความถูกลากคลุมอยู่
+-- (ถ้ามีข้อความถูกเลือก Workbench จะรันเฉพาะส่วนที่เลือก)
+-- =====================================================================
+
 SET NAMES utf8mb4;
 
 DROP DATABASE IF EXISTS project;
@@ -8,7 +26,11 @@ CREATE DATABASE project
 
 USE project;
 
--- 0) users: บัญชีผู้ใช้ (นักศึกษา / อาจารย์)
+-- ---------------------------------------------------------------------
+-- 0) users : บัญชีผู้ใช้ (นักศึกษา / อาจารย์)
+--    - เก็บ "รหัสผ่านที่เข้ารหัสแล้ว" (PBKDF2 + salt) ไม่เก็บรหัสผ่านจริง
+--    - email ห้ามซ้ำ และ (ชื่อ, นามสกุล) ห้ามซ้ำ เพราะใช้ชื่อ-นามสกุลล็อกอินได้
+-- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS users (
     user_id       INT UNSIGNED NOT NULL AUTO_INCREMENT,
     role          ENUM('student','teacher') NOT NULL COMMENT 'student = นักศึกษา, teacher = อาจารย์',
@@ -22,7 +44,9 @@ CREATE TABLE IF NOT EXISTS users (
     UNIQUE KEY uq_user_name (first_name, last_name)
 ) ENGINE=InnoDB;
 
--- 1) rooms: ห้องเรียน
+-- ---------------------------------------------------------------------
+-- 1) rooms : ห้องเรียน
+-- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS rooms (
     room_id    VARCHAR(20)  NOT NULL,
     room_name  VARCHAR(100) NOT NULL,
@@ -32,7 +56,9 @@ CREATE TABLE IF NOT EXISTS rooms (
     PRIMARY KEY (room_id)
 ) ENGINE=InnoDB;
 
--- 2) time_slots: คาบเวลา (รายชั่วโมง 08:00 - 18:00)
+-- ---------------------------------------------------------------------
+-- 2) time_slots : คาบเวลา (รายชั่วโมง 08:00 - 18:00)
+-- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS time_slots (
     slot_id    CHAR(4)      NOT NULL COMMENT 'เช่น 0800',
     start_time TIME         NOT NULL,
@@ -41,8 +67,10 @@ CREATE TABLE IF NOT EXISTS time_slots (
     PRIMARY KEY (slot_id)
 ) ENGINE=InnoDB;
 
--- 3) bookings: การจองที่มีผลอยู่ในปัจจุบัน
--- UNIQUE (room_id, booking_date, slot_id) กันจองซ้ำคาบเดียวกัน
+-- ---------------------------------------------------------------------
+-- 3) bookings : การจองที่มีผลอยู่ในปัจจุบัน
+--    UNIQUE (room_id, booking_date, slot_id) กันจองซ้ำคาบเดียวกัน
+-- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS bookings (
     booking_id   INT UNSIGNED NOT NULL AUTO_INCREMENT,
     room_id      VARCHAR(20)  NOT NULL,
@@ -67,9 +95,14 @@ CREATE TABLE IF NOT EXISTS bookings (
         ON UPDATE CASCADE ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
--- 4) history: ประวัติการจอง/ยกเลิก
--- ไม่เชื่อมกับ bookings เพราะแถวใน bookings ถูกลบตอนยกเลิก
--- เก็บ room_name / slot_label เป็นสำเนาเพื่อรักษาข้อมูล ณ เวลาที่เกิดเหตุการณ์
+-- ---------------------------------------------------------------------
+-- 4) history : ประวัติการจอง/ยกเลิก
+--    - เชื่อมกับ rooms และ time_slots ด้วย foreign key (ON DELETE RESTRICT
+--      = ลบห้องหรือคาบที่ยังมีประวัติอยู่ไม่ได้ ประวัติจึงไม่หาย)
+--    - ไม่เชื่อมกับ bookings เพราะแถวใน bookings ถูกลบตอนยกเลิก
+--    - ยังเก็บ room_name / slot_label เป็นสำเนา เพื่อให้ประวัติอ่านได้
+--      เหมือนตอนเกิดเหตุการณ์ แม้ภายหลังชื่อห้องจะถูกแก้
+-- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS history (
     history_id   INT UNSIGNED NOT NULL AUTO_INCREMENT,
     room_id      VARCHAR(20)  NOT NULL,
@@ -91,7 +124,9 @@ CREATE TABLE IF NOT EXISTS history (
         ON UPDATE CASCADE ON DELETE RESTRICT
 ) ENGINE=InnoDB;
 
--- ข้อมูลตั้งต้น: ห้องเรียน
+-- ---------------------------------------------------------------------
+-- ข้อมูลตั้งต้น: ห้องเรียน (แก้ให้ตรงกับของจริงได้)
+-- ---------------------------------------------------------------------
 INSERT IGNORE INTO rooms (room_id, room_name, building, capacity, color) VALUES
     ('r12-201', 'ห้อง 12-201',       'อาคารเรียนรวม 12',          60, '#E4572E'),
     ('r12-305', 'ห้อง 12-305',       'อาคารเรียนรวม 12',          40, '#1B998B'),
@@ -100,7 +135,9 @@ INSERT IGNORE INTO rooms (room_id, room_name, building, capacity, color) VALUES
     ('r-lab-a', 'ห้องปฏิบัติการ A',  'อาคารวิศวกรรมคอมพิวเตอร์',  30, '#C4436B'),
     ('r-semi',  'ห้องสัมมนา',        'อาคารวิศวกรรมคอมพิวเตอร์',  20, '#2E8B57');
 
+-- ---------------------------------------------------------------------
 -- ข้อมูลตั้งต้น: คาบเวลา
+-- ---------------------------------------------------------------------
 INSERT IGNORE INTO time_slots (slot_id, start_time, end_time, slot_label) VALUES
     ('0800', '08:00:00', '09:00:00', '08:00 – 09:00'),
     ('0900', '09:00:00', '10:00:00', '09:00 – 10:00'),
@@ -113,19 +150,18 @@ INSERT IGNORE INTO time_slots (slot_id, start_time, end_time, slot_label) VALUES
     ('1600', '16:00:00', '17:00:00', '16:00 – 17:00'),
     ('1700', '17:00:00', '18:00:00', '17:00 – 18:00');
 
+-- ---------------------------------------------------------------------
+-- ตารางเพิ่มเติม (v2) : เพิ่มอย่างเดียว ไม่กระทบตารางเดิม
+-- ---------------------------------------------------------------------
 
-
-
-USE project;
-
--- equipment: รายการอุปกรณ์/สิ่งอำนวยความสะดวกทั้งหมด
+-- equipment : รายการอุปกรณ์/สิ่งอำนวยความสะดวกทั้งหมด
 CREATE TABLE IF NOT EXISTS equipment (
     equipment_id   VARCHAR(20) NOT NULL,
     equipment_name VARCHAR(60) NOT NULL,
     PRIMARY KEY (equipment_id)
 ) ENGINE=InnoDB;
 
--- room_equipment: ห้องไหนมีอุปกรณ์อะไรกี่ชิ้น (many-to-many)
+-- room_equipment : ห้องไหนมีอุปกรณ์อะไรกี่ชิ้น (ความสัมพันธ์ many-to-many)
 CREATE TABLE IF NOT EXISTS room_equipment (
     room_id      VARCHAR(20) NOT NULL,
     equipment_id VARCHAR(20) NOT NULL,
@@ -139,7 +175,7 @@ CREATE TABLE IF NOT EXISTS room_equipment (
         ON UPDATE CASCADE ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
--- booking_details: ข้อมูลเพิ่มเติมของการจอง (1 การจอง : 1 แถว)
+-- booking_details : ข้อมูลเพิ่มเติมของการจอง (1 การจอง : 1 แถว)
 -- ถ้ายกเลิกการจอง แถวนี้จะถูกลบตามอัตโนมัติ
 CREATE TABLE IF NOT EXISTS booking_details (
     booking_id  INT UNSIGNED NOT NULL,
@@ -152,7 +188,6 @@ CREATE TABLE IF NOT EXISTS booking_details (
         ON UPDATE CASCADE ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
--- ข้อมูลตั้งต้น: อุปกรณ์
 INSERT IGNORE INTO equipment (equipment_id, equipment_name) VALUES
     ('projector',  'โปรเจกเตอร์'),
     ('aircon',     'เครื่องปรับอากาศ'),
@@ -161,7 +196,6 @@ INSERT IGNORE INTO equipment (equipment_id, equipment_name) VALUES
     ('pc',         'คอมพิวเตอร์'),
     ('wifi',       'Wi-Fi');
 
--- ข้อมูลตั้งต้น: อุปกรณ์ประจำห้อง
 INSERT IGNORE INTO room_equipment (room_id, equipment_id, quantity) VALUES
     ('r12-201', 'projector', 1), ('r12-201', 'aircon', 2), ('r12-201', 'whiteboard', 2), ('r12-201', 'mic', 1),
     ('r12-305', 'projector', 1), ('r12-305', 'aircon', 2), ('r12-305', 'whiteboard', 1),
@@ -170,13 +204,11 @@ INSERT IGNORE INTO room_equipment (room_id, equipment_id, quantity) VALUES
     ('r-lab-a', 'pc', 30), ('r-lab-a', 'projector', 1), ('r-lab-a', 'aircon', 2), ('r-lab-a', 'wifi', 1),
     ('r-semi',  'projector', 1), ('r-semi',  'aircon', 1), ('r-semi',  'whiteboard', 1), ('r-semi', 'wifi', 1);
 
--- KMITL Classroom Booking - Part 3: Triggers, Views and SQL Examples
--- รันหลังจาก 01_core_database.sql และ 02_additional_tables.sql
-
-USE project;
-
+-- ---------------------------------------------------------------------
 -- Triggers: บันทึกประวัติอัตโนมัติทุกครั้งที่จองหรือยกเลิก
 -- แอปเวอร์ชัน MySQL ไม่เขียน history เอง ต้องมี trigger สองตัวนี้
+-- ไม่เช่นนั้นหน้า "ดูประวัติ" จะว่างเปล่า
+-- ---------------------------------------------------------------------
 DROP TRIGGER IF EXISTS trg_bookings_after_insert;
 DROP TRIGGER IF EXISTS trg_bookings_before_delete;
 
@@ -210,7 +242,9 @@ END$$
 
 DELIMITER ;
 
--- View: รายการจองพร้อมชื่อห้องและคาบเวลา
+-- ---------------------------------------------------------------------
+-- View: รายการจองพร้อมชื่อห้องและคาบเวลา (อ่านง่ายสำหรับดูข้อมูล)
+-- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW v_booking_details AS
 SELECT b.booking_id,
        b.booking_date,
@@ -225,9 +259,12 @@ JOIN rooms r      ON r.room_id  = b.room_id
 JOIN time_slots s ON s.slot_id  = b.slot_id
 ORDER BY b.booking_date, r.room_name, s.start_time;
 
--- ตัวอย่างคำสั่งที่แอปจะใช้ (เลือกคำสั่งแล้วรันทีละคำสั่งได้)
 
--- ดูตารางของห้องหนึ่ง ในวันหนึ่ง (ว่าง/จองแล้ว)
+-- =====================================================================
+-- ตัวอย่างคำสั่งที่แอปจะใช้ (ลองรันทีละคำสั่งใน Workbench ได้)
+-- =====================================================================
+
+-- ดูตารางของห้องหนึ่ง ในวันหนึ่ง (ว่าง/จองแล้ว) -- ตรงกับหน้าจอหลักของแอป
 -- SELECT s.slot_label,
 --        IF(b.booking_id IS NULL, 'ว่าง', 'จองแล้ว') AS status,
 --        b.booker_name, b.purpose
@@ -249,6 +286,27 @@ ORDER BY b.booking_date, r.room_name, s.start_time;
 -- SELECT logged_at, action, room_name, booking_date, slot_label, booker_name, purpose
 -- FROM history ORDER BY history_id DESC LIMIT 200;
 
--- หมายเหตุ:
--- ส่วน Migration สำหรับเพิ่ม users ให้ฐานข้อมูลเก่าในไฟล์ต้นฉบับ
--- ไม่ต้องรันในชุดติดตั้งใหม่นี้ เพราะ Part 1 สร้าง users และ user_id ไว้แล้ว
+
+-- =====================================================================
+-- (ทางเลือก) ถ้าไม่อยากลบฐานข้อมูลเดิม ให้ "ไม่ต้องรันทั้งไฟล์" แต่รันเฉพาะ
+-- ส่วนนี้แทน (ลบเครื่องหมาย -- ออกก่อน) เพื่อเพิ่มระบบสมาชิกเข้าไปเฉยๆ
+-- =====================================================================
+-- USE project;
+-- CREATE TABLE IF NOT EXISTS users (
+--     user_id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+--     role ENUM('student','teacher') NOT NULL,
+--     first_name VARCHAR(50) NOT NULL,
+--     last_name VARCHAR(50) NOT NULL,
+--     email VARCHAR(100) NOT NULL,
+--     password_hash VARCHAR(255) NOT NULL,
+--     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--     PRIMARY KEY (user_id),
+--     UNIQUE KEY uq_user_email (email),
+--     UNIQUE KEY uq_user_name (first_name, last_name)
+-- ) ENGINE=InnoDB;
+-- ALTER TABLE bookings
+--     ADD COLUMN user_id INT UNSIGNED NULL AFTER slot_id,
+--     ADD KEY idx_booking_user (user_id),
+--     ADD CONSTRAINT fk_bookings_user FOREIGN KEY (user_id) REFERENCES users (user_id)
+--         ON UPDATE CASCADE ON DELETE SET NULL;
+-- (การจองเก่าจะมี user_id เป็น NULL ซึ่งจะไม่มีใครกดยกเลิกในแอปได้ ลบผ่าน Workbench แทน)
